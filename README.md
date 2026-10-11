@@ -118,7 +118,7 @@ git init
 git add .
 git commit -m "NeuralRAG Studio: Crimson Multimodal Edition"
 git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/pdf-rag-lab.git
+git remote add origin https://github.com/rajeelahmad-main/NeuralRAG-Studio.git
 git push -u origin main
 ```
 *(Notice: git will automatically skip `.streamlit/secrets.toml` because of `.gitignore`!)*
@@ -129,7 +129,7 @@ git push -u origin main
 
 1. Go to [share.streamlit.io](https://share.streamlit.io/) and log in with GitHub.
 2. Click **Create app**.
-3. Select your repository: `YOUR_USERNAME/pdf-rag-lab`, Branch: `main`, Main file path: `app.py`.
+3. Select your repository: `rajeelahmad-main/NeuralRAG-Studio`, Branch: `main`, Main file path: `app.py`.
 4. Click **Advanced settings** → **Secrets**, and enter your Gemini API key:
    ```toml
    GEMINI_API_KEY = "your_gemini_api_key_here"
@@ -144,7 +144,7 @@ git push -u origin main
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/YOUR_USERNAME/pdf-rag-lab.git
+git clone https://github.com/rajeelahmad-main/NeuralRAG-Studio.git
 cd pdf-rag-lab
 
 # 2. Create virtual environment
