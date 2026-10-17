@@ -1,21 +1,11 @@
-# Streamlit Cloud & FastAPI Dependencies
+# Streamlit Cloud Deployment Requirements
 streamlit>=1.35.0
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-python-multipart>=0.0.9
-pydantic>=2.7.0
-httpx>=0.27.0
-pytest>=8.0.0
 requests>=2.31.0
-
-# Multi-Format Document Parsing & OCR
 pypdf>=5.0.0
 python-docx>=1.1.0
 openpyxl>=3.1.0
 pandas>=2.0.0
 tabulate>=0.9.0
 Pillow>=10.0.0
-
-# Hybrid Vector Search & TF-IDF
 scikit-learn>=1.3.0
 numpy>=1.24.0
