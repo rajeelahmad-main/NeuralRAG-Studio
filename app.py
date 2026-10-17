@@ -3,18 +3,20 @@
 NeuralRAG Studio — Commercial AI Document Intelligence Platform
 CRISP + Multi-File Hybrid RAG + Corrective RAG (CRAG) + Gemini Model Selector
 =============================================================================
-A modern ChatGPT-inspired full-stack document workspace in Streamlit:
-1. ChatGPT-Style Layout: Clean sidebar, centered landing, and bottom composer.
-2. Server-Side Protected API Key: Exclusively uses server key; never leaks.
-3. Multi-File Ingestion: PDF (Digital + OCR), Word (.docx), Excel/CSV, Markdown, Images.
-4. Gemini Model Selector: gemini-3.1-flash-lite, gemini-3.5-flash, gemini-3.5-flash-lite, gemini-3.1-pro-preview.
-5. 3 Retrieval Modes: Corrective RAG (CRAG), Document Search, Compare Documents.
-6. Clickable [Source N] Citations with document, page, heading, and row provenance.
-7. Pure Black Dark Theme & Clean Light Theme with 1-click toggle buttons.
+Matches the Next.js full-stack interface pixel-for-pixel:
+1. 3-Pane SaaS Workspace: Collapsible Sidebar, Central Chat, and Right Document Workspace Panel.
+2. Top Navigation Bar: Gemini Model Selector, Collection Badge, Theme Toggle, and Sources Drawer.
+3. 5 Commercial Starter Prompt Cards with badges (Overview, Compare Mode, Data & Tables, Deep Dive, CRISP Lab).
+4. ChatGPT-Style Composer with inside Retrieval Mode pills (Corrective RAG, Doc Search, Compare Docs).
+5. Right Document Workspace Panel: Tabs for Files & Source Inspector, Drag-and-Drop Uploader, Indexed File Cards with badges.
+6. Multi-File Parsing: PDF, DOCX, XLSX/XLS, CSV, MD, TXT, and Images with Gemini Vision OCR.
+7. Corrective RAG (CRAG) with query rewrite trace and clickable [Source N] citations.
+8. Server-Isolated API Key via Streamlit Secrets (never exposed).
 =============================================================================
 """
 
 import base64
+from datetime import datetime
 from io import BytesIO
 import json
 import os
@@ -27,7 +29,7 @@ import pypdf
 import requests
 import streamlit as st
 
-# Optional third-party parsers
+# Optional parsers
 try:
     import docx
 except ImportError:
@@ -38,306 +40,488 @@ try:
 except ImportError:
     pd = None
 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 
 # -----------------------------------------------------------------------------
-# 1. Page Configuration & Title
+# 1. Page Configuration & Meta
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="NeuralRAG — Commercial AI Document Intelligence",
+    page_title="NeuralRAG Studio | Multi-File AI Intelligence",
     page_icon="✨",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # -----------------------------------------------------------------------------
-# 2. Dual-Theme Styling System (Pure Dark #09090b & Clean Light #ffffff)
+# 2. Session State Initialization
 # -----------------------------------------------------------------------------
 if "theme_mode" not in st.session_state:
     st.session_state["theme_mode"] = "dark"
 
+if "show_right_panel" not in st.session_state:
+    st.session_state["show_right_panel"] = True
+
+if "right_panel_tab" not in st.session_state:
+    st.session_state["right_panel_tab"] = "files"
+
+if "selected_model" not in st.session_state:
+    st.session_state["selected_model"] = "gemini-3.1-flash-lite"
+
+if "retrieval_mode" not in st.session_state:
+    st.session_state["retrieval_mode"] = "corrective_rag"
+
+if "active_collection_name" not in st.session_state:
+    st.session_state["active_collection_name"] = "General Workspace"
+
+if "indexed_files_meta" not in st.session_state:
+    st.session_state["indexed_files_meta"] = []
+
+if "all_chunks" not in st.session_state:
+    st.session_state["all_chunks"] = []
+
+if "search_vec" not in st.session_state:
+    st.session_state["search_vec"] = None
+
+if "search_mat" not in st.session_state:
+    st.session_state["search_mat"] = None
+
+if "conversations" not in st.session_state:
+    st.session_state["conversations"] = [
+        {
+            "id": "conv-default",
+            "title": "Analyze this chart",
+            "messages": [],
+            "date": "Today"
+        },
+        {
+            "id": "conv-sample-1",
+            "title": "What was the Q3 2024 Revenue...",
+            "messages": [],
+            "date": "Today"
+        }
+    ]
+
+if "active_conv_id" not in st.session_state:
+    st.session_state["active_conv_id"] = "conv-default"
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+
+if "selected_citation" not in st.session_state:
+    st.session_state["selected_citation"] = None
+
 is_dark = (st.session_state["theme_mode"] == "dark")
 
+
+# -----------------------------------------------------------------------------
+# 3. Dynamic Design System & Pixel-Perfect Next.js CSS
+# -----------------------------------------------------------------------------
 if is_dark:
-    t_bg_app = "#09090b"
-    t_bg_sidebar = "#0f0f12"
-    t_bg_card = "#18181b"
-    t_border = "#27272a"
-    t_text_primary = "#f4f4f5"
-    t_text_secondary = "#a1a1aa"
-    t_accent = "#3b82f6"
-    t_accent_glow = "rgba(59, 130, 246, 0.15)"
-    t_user_bg = "#27272a"
-    t_asst_bg = "#121215"
-    t_input_bg = "#18181b"
-    t_btn_bg = "#18181b"
+    bg_app = "#09090b"
+    bg_sidebar = "#09090b"
+    bg_panel = "#0e0e11"
+    bg_card = "#121215"
+    bg_card_hover = "#18181b"
+    bg_input = "#121215"
+    border_color = "rgba(255, 255, 255, 0.08)"
+    border_focus = "rgba(59, 130, 246, 0.5)"
+    text_primary = "#f4f4f5"
+    text_secondary = "#a1a1aa"
+    text_muted = "#71717a"
+    accent_blue = "#3b82f6"
+    accent_emerald = "#10b981"
+    accent_purple = "#a855f7"
 else:
-    t_bg_app = "#ffffff"
-    t_bg_sidebar = "#f8fafc"
-    t_bg_card = "#ffffff"
-    t_border = "#e2e8f0"
-    t_text_primary = "#0f172a"
-    t_text_secondary = "#64748b"
-    t_accent = "#2563eb"
-    t_accent_glow = "rgba(37, 99, 235, 0.10)"
-    t_user_bg = "#f1f5f9"
-    t_asst_bg = "#ffffff"
-    t_input_bg = "#ffffff"
-    t_btn_bg = "#ffffff"
+    bg_app = "#ffffff"
+    bg_sidebar = "#f9fafb"
+    bg_panel = "#f9fafb"
+    bg_card = "#ffffff"
+    bg_card_hover = "#f3f4f6"
+    bg_input = "#f9fafb"
+    border_color = "rgba(0, 0, 0, 0.08)"
+    border_focus = "rgba(59, 130, 246, 0.5)"
+    text_primary = "#18181b"
+    text_secondary = "#52525b"
+    text_muted = "#a1a1aa"
+    accent_blue = "#2563eb"
+    accent_emerald = "#059669"
+    accent_purple = "#9333ea"
 
 st.markdown(f"""
 <style>
-    /* Complete Removal of Deploy Button, Header Chrome & Status */
-    .stAppDeployButton,
-    [data-testid="stAppDeployButton"],
-    div[data-testid="stToolbar"],
-    div[data-testid="stDecoration"],
-    div[data-testid="stStatusWidget"],
-    #MainMenu,
+    /* Reset & Base */
     header[data-testid="stHeader"],
-    .stAppHeader {{
+    .stAppDeployButton,
+    #MainMenu,
+    footer {{
         display: none !important;
         visibility: hidden !important;
-        height: 0px !important;
-        width: 0px !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
+    }}
+    .stApp {{
+        background-color: {bg_app} !important;
+        color: {text_primary} !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
     }}
     .block-container {{
-        padding-top: 1rem !important;
-        padding-bottom: 4rem !important;
-        max-width: 900px !important;
-    }}
-
-    /* Canvas & Global Typography */
-    .stApp,
-    [data-testid="stAppViewContainer"],
-    [data-testid="stMainBlockContainer"] {{
-        background-color: {t_bg_app} !important;
-        color: {t_text_primary} !important;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        padding-top: 0.5rem !important;
+        padding-bottom: 2rem !important;
+        padding-left: 1.5rem !important;
+        padding-right: 1.5rem !important;
+        max-width: 100% !important;
     }}
 
     /* Sidebar Styling */
-    section[data-testid="stSidebar"],
-    [data-testid="stSidebarHeader"],
-    [data-testid="stSidebarContent"],
-    [data-testid="stSidebarUserContent"],
-    [data-testid="stSidebarNav"] {{
-        background-color: {t_bg_sidebar} !important;
-        border-right: 1px solid {t_border} !important;
-        color: {t_text_primary} !important;
+    section[data-testid="stSidebar"] {{
+        background-color: {bg_sidebar} !important;
+        border-right: 1px solid {border_color} !important;
+        width: 270px !important;
+        min-width: 270px !important;
     }}
-    [data-testid="stSidebarHeader"] {{
-        background-color: {t_bg_sidebar} !important;
-        border-bottom: 1px solid {t_border} !important;
-        padding: 0.5rem 1rem !important;
+    section[data-testid="stSidebar"] > div:first-child {{
+        padding-top: 1rem !important;
+        padding-left: 0.8rem !important;
+        padding-right: 0.8rem !important;
     }}
     [data-testid="stSidebarCollapseButton"] button {{
-        color: {t_text_primary} !important;
+        color: {text_secondary} !important;
     }}
 
-    /* File Uploader Box */
-    [data-testid="stFileUploader"],
-    [data-testid="stFileUploader"] section,
-    [data-testid="stFileUploadDropzone"],
-    [data-testid="stFileUploaderDropzone"],
-    section[data-testid="stFileUploadDropzone"],
-    div[data-testid="stFileUploaderDropzone"] {{
-        background-color: {t_input_bg} !important;
-        border: 1px dashed {t_border} !important;
-        border-radius: 12px !important;
-        color: {t_text_primary} !important;
-    }}
-    [data-testid="stFileUploader"] section:hover,
-    [data-testid="stFileUploadDropzone"]:hover {{
-        border-color: {t_accent} !important;
-        background-color: {t_accent_glow} !important;
-    }}
-    [data-testid="stFileUploader"] small,
-    [data-testid="stFileUploader"] span,
-    [data-testid="stFileUploader"] p,
-    [data-testid="stFileUploader"] label,
-    [data-testid="stFileUploadDropzone"] small,
-    [data-testid="stFileUploadDropzone"] span {{
-        color: {t_text_secondary} !important;
-    }}
-
-    /* Sticky Bottom Composer Area */
-    div[data-testid="stBottom"],
-    div[data-testid="stBottom"] > div,
-    footer {{
-        background-color: {t_bg_app} !important;
-        border-top: none !important;
-    }}
-    div[data-testid="stChatInput"] {{
-        background-color: {t_input_bg} !important;
-        border: 1px solid {t_border} !important;
-        border-radius: 24px !important;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
-        padding: 2px !important;
-    }}
-    div[data-testid="stChatInput"] > div {{
-        background-color: {t_input_bg} !important;
-        border: none !important;
-        border-radius: 22px !important;
-    }}
-    div[data-testid="stChatInput"] textarea {{
-        background-color: transparent !important;
-        color: {t_text_primary} !important;
-        font-size: 0.95rem !important;
-    }}
-    div[data-testid="stChatInput"] button {{
-        background-color: {t_accent} !important;
-        color: #ffffff !important;
-        border: none !important;
-        border-radius: 50% !important;
-    }}
-
-    /* Clean Buttons */
-    div[data-testid="stButton"] button {{
-        background-color: {t_btn_bg} !important;
-        color: {t_text_primary} !important;
-        border: 1px solid {t_border} !important;
-        border-radius: 10px !important;
-        padding: 8px 14px !important;
-        font-size: 0.88rem !important;
-        font-weight: 500 !important;
-        transition: all 0.15s ease !important;
-    }}
-    div[data-testid="stButton"] button:hover {{
-        border-color: {t_accent} !important;
-        color: {t_accent} !important;
-    }}
-
-    /* Chat Messages */
-    div[data-testid="stChatMessage"] {{
-        background-color: {t_asst_bg} !important;
-        border: 1px solid {t_border} !important;
-        border-radius: 16px !important;
-        padding: 16px 20px !important;
-        margin-bottom: 16px !important;
-        color: {t_text_primary} !important;
-    }}
-
-    /* Brand Header */
-    .brand-header {{
+    /* Brand Header in Sidebar */
+    .sb-brand {{
         display: flex;
         align-items: center;
         gap: 10px;
-        padding-bottom: 12px;
-        border-bottom: 1px solid {t_border};
-        margin-bottom: 12px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid {border_color};
+        margin-bottom: 14px;
     }}
-    .brand-title {{
-        font-size: 1.15rem;
+    .sb-logo {{
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        background: #ffffff;
+        color: #09090b;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.1rem;
+        font-weight: 800;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }}
+    .sb-title {{
+        font-size: 0.95rem;
         font-weight: 700;
-        color: {t_text_primary};
-        letter-spacing: -0.02em;
+        color: {text_primary};
+        letter-spacing: -0.01em;
+        line-height: 1.2;
     }}
-    .brand-sub {{
-        font-size: 0.74rem;
-        color: {t_text_secondary};
+    .sb-sub {{
+        font-size: 0.72rem;
+        color: {text_muted};
+        font-weight: 500;
     }}
 
-    /* Welcome Banner */
-    .welcome-container {{
-        text-align: center;
-        padding: 40px 10px 24px 10px;
+    /* New Chat Pill Button */
+    .btn-new-chat {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        padding: 9px 14px;
+        border-radius: 12px;
+        background: {bg_card};
+        border: 1px solid {border_color};
+        color: {text_primary};
+        font-size: 0.84rem;
+        font-weight: 600;
+        margin-bottom: 12px;
+        text-decoration: none;
     }}
-    .welcome-logo {{
+    .btn-new-chat:hover {{
+        background: {bg_card_hover};
+        border-color: rgba(255,255,255,0.18);
+    }}
+
+    /* Sidebar Conversation Item */
+    .sb-conv-item {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        color: {text_secondary};
+        font-size: 0.82rem;
+        margin-bottom: 3px;
+        transition: all 0.12s ease;
+        cursor: pointer;
+    }}
+    .sb-conv-item:hover, .sb-conv-active {{
+        background: {bg_card_hover};
+        color: {text_primary};
+    }}
+
+    /* Top Navigation Bar */
+    .top-nav-bar {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 16px;
+        border-bottom: 1px solid {border_color};
+        margin-bottom: 20px;
+        background: {bg_app};
+    }}
+
+    /* Center Welcome Screen */
+    .welcome-box {{
+        text-align: center;
+        padding: 32px 16px 20px 16px;
+        max-width: 680px;
+        margin: 0 auto;
+    }}
+    .welcome-sparkle {{
         width: 52px;
         height: 52px;
-        line-height: 52px;
         border-radius: 16px;
-        background: {t_accent};
-        color: #ffffff;
+        background: #ffffff;
+        color: #09090b;
         font-size: 1.6rem;
         margin: 0 auto 16px auto;
         display: flex;
         align-items: center;
         justify-content: center;
+        box-shadow: 0 4px 16px rgba(255,255,255,0.15);
     }}
-    .welcome-title {{
-        font-size: 1.7rem;
+    .welcome-h1 {{
+        font-size: 1.65rem;
         font-weight: 700;
-        color: {t_text_primary};
-        margin-bottom: 6px;
-        letter-spacing: -0.01em;
+        color: {text_primary};
+        letter-spacing: -0.025em;
+        margin-bottom: 8px;
     }}
-    .welcome-sub {{
-        font-size: 0.95rem;
-        color: {t_text_secondary};
-        max-width: 580px;
-        margin: 0 auto;
+    .welcome-p {{
+        font-size: 0.86rem;
+        color: {text_secondary};
         line-height: 1.5;
+        margin-bottom: 24px;
     }}
 
-    /* Pill Badges */
-    .pill-badge {{
+    /* Starter Prompt Cards */
+    .card-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-bottom: 24px;
+    }}
+    .starter-card {{
+        background: {bg_card};
+        border: 1px solid {border_color};
+        border-radius: 14px;
+        padding: 14px 16px;
+        text-align: left;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }}
+    .starter-card:hover {{
+        background: {bg_card_hover};
+        border-color: rgba(59, 130, 246, 0.4);
+        transform: translateY(-1px);
+    }}
+    .starter-top {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+    }}
+    .starter-title {{
+        font-size: 0.82rem;
+        font-weight: 600;
+        color: {text_primary};
+    }}
+    .starter-badge {{
+        font-size: 0.68rem;
+        font-weight: 500;
+        padding: 2px 7px;
+        border-radius: 9999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: {text_secondary};
+    }}
+    .starter-desc {{
+        font-size: 0.74rem;
+        color: {text_muted};
+        line-height: 1.4;
+    }}
+
+    /* Right Document Workspace Panel */
+    .doc-panel-container {{
+        background: {bg_panel};
+        border: 1px solid {border_color};
+        border-radius: 16px;
+        padding: 16px;
+        min-height: 600px;
+    }}
+    .doc-panel-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-bottom: 12px;
+        border-bottom: 1px solid {border_color};
+        margin-bottom: 14px;
+    }}
+    .doc-panel-title {{
+        font-size: 0.92rem;
+        font-weight: 700;
+        color: {text_primary};
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }}
+
+    /* File Dropzone Box */
+    .dropzone-box {{
+        background: {bg_card};
+        border: 1px dashed {border_color};
+        border-radius: 12px;
+        padding: 18px 14px;
+        text-align: center;
+        margin-bottom: 16px;
+    }}
+    .dropzone-icon {{
+        font-size: 1.5rem;
+        color: {accent_blue};
+        margin-bottom: 6px;
+    }}
+    .dropzone-text {{
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: {text_primary};
+        margin-bottom: 6px;
+    }}
+    .dropzone-pills {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: center;
+    }}
+    .pill-format {{
+        font-size: 0.65rem;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.06);
+        color: {text_secondary};
+    }}
+
+    /* Indexed File Item Card */
+    .file-item-card {{
+        background: {bg_card};
+        border: 1px solid {border_color};
+        border-radius: 12px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+    }}
+    .file-item-top {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 4px;
+    }}
+    .file-item-name {{
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: {text_primary};
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 180px;
+    }}
+    .badge-indexed {{
+        font-size: 0.68rem;
+        font-weight: 600;
+        color: #10b981;
+        background: rgba(16, 185, 129, 0.12);
+        border: 1px solid rgba(16, 185, 129, 0.25);
+        border-radius: 9999px;
+        padding: 2px 7px;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        background: {t_bg_card};
-        border: 1px solid {t_border};
-        border-radius: 20px;
-        padding: 4px 12px;
-        font-size: 0.78rem;
-        font-weight: 600;
-        color: {t_text_secondary};
+        gap: 3px;
+    }}
+    .file-item-meta {{
+        font-size: 0.72rem;
+        color: {text_muted};
+        margin-bottom: 8px;
+    }}
+
+    /* Message Bubbles */
+    div[data-testid="stChatMessage"] {{
+        background-color: {bg_card} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 16px !important;
+        padding: 16px 20px !important;
+        margin-bottom: 14px !important;
+        color: {text_primary} !important;
+    }}
+
+    /* Chat Input Styling */
+    div[data-testid="stChatInput"] {{
+        background-color: {bg_input} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 16px !important;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4) !important;
+    }}
+    div[data-testid="stChatInput"]:focus-within {{
+        border-color: {border_focus} !important;
+    }}
+    div[data-testid="stChatInput"] textarea {{
+        color: {text_primary} !important;
+        font-size: 0.88rem !important;
+    }}
+
+    /* Custom Streamlit Buttons */
+    div[data-testid="stButton"] button {{
+        background-color: {bg_card} !important;
+        color: {text_primary} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 10px !important;
+        font-size: 0.82rem !important;
+        font-weight: 500 !important;
+        transition: all 0.12s ease !important;
+    }}
+    div[data-testid="stButton"] button:hover {{
+        border-color: {accent_blue} !important;
+        color: {accent_blue} !important;
     }}
 </style>
 """, unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
-# 3. Server API Key Management & Diagnostics
+# 4. Protected Server API Key Resolution
 # -----------------------------------------------------------------------------
-def get_primary_api_key() -> Tuple[str, str]:
+def get_server_api_key() -> str:
     key = ""
-    source = "Not Configured"
     try:
         if "GEMINI_API_KEY" in st.secrets:
             key = str(st.secrets["GEMINI_API_KEY"]).strip()
-            source = "Streamlit Secrets (.streamlit/secrets.toml)"
     except Exception:
         pass
-
     if not key:
         key = os.getenv("GEMINI_API_KEY", "").strip()
-        if key:
-            source = "Environment Variable (GEMINI_API_KEY)"
-
-    return key, source
+    return key
 
 
-def check_api_health(api_key: str, model_id: str = "gemini-3.1-flash-lite") -> Dict[str, Any]:
-    if not api_key:
-        return {"status": "error", "message": "Server GEMINI_API_KEY is not configured.", "latency_ms": 0}
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    payload = {
-        "contents": [{"parts": [{"text": "Reply with OK."}]}],
-        "generationConfig": {"maxOutputTokens": 5, "temperature": 0.0}
-    }
-    t0 = time.time()
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        latency = int((time.time() - t0) * 1000)
-        if res.status_code == 200:
-            return {"status": "success", "latency_ms": latency, "model": model_id}
-        return {"status": "error", "code": res.status_code, "message": res.text, "latency_ms": latency}
-    except Exception as exc:
-        return {"status": "error", "message": str(exc), "latency_ms": int((time.time() - t0) * 1000)}
+ACTIVE_API_KEY = get_server_api_key()
 
 
 # -----------------------------------------------------------------------------
-# 4. Multimodal Parsers (PDF + Vision OCR, Word, Excel, CSV, Images, Text)
+# 5. Multimodal Document Ingestion & Parsers
 # -----------------------------------------------------------------------------
-def run_gemini_vision_ocr(image_bytes: bytes, mime_type: str, api_key: str, model: str) -> str:
+def run_gemini_ocr(image_bytes: bytes, mime_type: str, api_key: str, model_id: str) -> str:
     if not api_key:
         return "[Vision OCR requires server GEMINI_API_KEY]"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     payload = {
@@ -361,9 +545,10 @@ def run_gemini_vision_ocr(image_bytes: bytes, mime_type: str, api_key: str, mode
         return f"[OCR Error: {str(exc)}]"
 
 
-def parse_single_file(file_bytes: bytes, filename: str, api_key: str, model: str) -> List[Dict[str, Any]]:
+def parse_uploaded_file(file_bytes: bytes, filename: str, api_key: str, model_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
     ext = os.path.splitext(filename.lower())[1]
+    file_size_kb = round(len(file_bytes) / 1024, 1)
 
     if ext == ".pdf":
         reader = pypdf.PdfReader(BytesIO(file_bytes))
@@ -371,8 +556,7 @@ def parse_single_file(file_bytes: bytes, filename: str, api_key: str, model: str
             text = (page.extract_text() or "").strip()
             if len(text) < 40 and api_key and len(page.images) > 0:
                 try:
-                    first_img = page.images[0]
-                    ocr = run_gemini_vision_ocr(first_img.data, "image/png", api_key, model)
+                    ocr = run_gemini_ocr(page.images[0].data, "image/png", api_key, model_id)
                     if ocr and not ocr.startswith("[OCR"):
                         text = f"{text}\n\n[Scanned Page OCR]:\n{ocr}".strip()
                 except Exception:
@@ -383,17 +567,17 @@ def parse_single_file(file_bytes: bytes, filename: str, api_key: str, model: str
     elif ext == ".docx" and docx is not None:
         doc = docx.Document(BytesIO(file_bytes))
         sec_num = 1
-        current_lines = []
+        lines = []
         for p in doc.paragraphs:
             if p.text.strip():
                 if p.style.name.startswith("Heading"):
-                    if current_lines:
-                        pages.append({"label": f"{filename} • Section {sec_num}", "text": "\n".join(current_lines), "filename": filename, "page": sec_num})
+                    if lines:
+                        pages.append({"label": f"{filename} • Section {sec_num}", "text": "\n".join(lines), "filename": filename, "page": sec_num})
                         sec_num += 1
-                        current_lines = []
-                current_lines.append(p.text.strip())
-        if current_lines:
-            pages.append({"label": f"{filename} • Section {sec_num}", "text": "\n".join(current_lines), "filename": filename, "page": sec_num})
+                        lines = []
+                lines.append(p.text.strip())
+        if lines:
+            pages.append({"label": f"{filename} • Section {sec_num}", "text": "\n".join(lines), "filename": filename, "page": sec_num})
 
     elif ext in (".xlsx", ".xls", ".csv") and pd is not None:
         try:
@@ -420,7 +604,7 @@ def parse_single_file(file_bytes: bytes, filename: str, api_key: str, model: str
 
     elif ext in (".png", ".jpg", ".jpeg", ".webp"):
         mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-        ocr_text = run_gemini_vision_ocr(file_bytes, mime, api_key, model)
+        ocr_text = run_gemini_ocr(file_bytes, mime, api_key, model_id)
         pages.append({"label": f"{filename} • Multimodal OCR", "text": ocr_text, "filename": filename, "page": 1})
 
     else:
@@ -428,71 +612,87 @@ def parse_single_file(file_bytes: bytes, filename: str, api_key: str, model: str
         if text:
             pages.append({"label": f"{filename} • Full Text", "text": text, "filename": filename, "page": 1})
 
-    return pages
-
-
-def build_chunks(pages: List[Dict[str, Any]], chunk_size: int = 650, overlap: int = 100) -> List[Dict[str, Any]]:
+    # Chunking
     chunks = []
-    c_id = 1
+    chunk_size = 650
+    overlap = 100
+    c_id = len(st.session_state["all_chunks"]) + 1
     for p in pages:
         txt = p["text"]
         start = 0
         while start < len(txt):
             end = min(start + chunk_size, len(txt))
-            chunk_str = txt[start:end].strip()
-            if chunk_str:
+            substr = txt[start:end].strip()
+            if substr:
                 chunks.append({
                     "id": c_id,
                     "label": p["label"],
                     "filename": p["filename"],
                     "page": p.get("page", 1),
-                    "text": chunk_str
+                    "text": substr
                 })
                 c_id += 1
             if end >= len(txt):
                 break
             start = max(end - overlap, start + 1)
-    return chunks
+
+    meta = {
+        "filename": filename,
+        "ext": ext.replace(".", "").upper() or "TXT",
+        "size_kb": file_size_kb,
+        "chunk_count": len(chunks),
+        "status": "Indexed"
+    }
+
+    return chunks, meta
 
 
-# -----------------------------------------------------------------------------
-# 5. Hybrid Retrieval & Corrective RAG (CRAG) Engine
-# -----------------------------------------------------------------------------
-def build_search_index(chunks: List[Dict[str, Any]]):
-    from sklearn.feature_extraction.text import TfidfVectorizer
+def reindex_all_documents():
+    chunks = st.session_state["all_chunks"]
+    if not chunks:
+        st.session_state["search_vec"] = None
+        st.session_state["search_mat"] = None
+        return
     texts = [c["text"] for c in chunks]
     vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True)
-    matrix = vec.fit_transform(texts)
-    return vec, matrix
+    mat = vec.fit_transform(texts)
+    st.session_state["search_vec"] = vec
+    st.session_state["search_mat"] = mat
 
 
-def search_chunks(query: str, chunks: List[Dict[str, Any]], vec, matrix, top_k: int = 5) -> List[Tuple[Dict[str, Any], float]]:
-    from sklearn.metrics.pairwise import cosine_similarity
+# -----------------------------------------------------------------------------
+# 6. Corrective RAG (CRAG) & Gemini Synthesis Engine
+# -----------------------------------------------------------------------------
+def search_evidence(query: str, top_k: int = 5) -> List[Tuple[Dict[str, Any], float]]:
+    chunks = st.session_state.get("all_chunks", [])
+    vec = st.session_state.get("search_vec")
+    mat = st.session_state.get("search_mat")
+    if not chunks or vec is None or mat is None:
+        return []
     q_vec = vec.transform([query])
-    scores = cosine_similarity(q_vec, matrix)[0]
+    scores = cosine_similarity(q_vec, mat)[0]
     top_indices = np.argsort(scores)[::-1][:min(top_k, len(chunks))]
     return [(chunks[int(i)], float(scores[int(i)])) for i in top_indices]
 
 
-def expand_query_for_crag(query: str) -> List[str]:
+def expand_query_crag(query: str) -> List[str]:
     stops = {"what", "where", "when", "which", "who", "why", "how", "is", "are", "was", "were", "the", "a", "an", "in", "on", "of", "to", "for", "with", "about", "from", "can", "you", "tell", "me"}
     words = [w for w in re.findall(r"\w+", query.lower()) if w not in stops and len(w) > 2]
     if not words:
         return []
-    rewrites = [" ".join(words)]
     expanded = list(words)
     for w in words:
-        if w in ("revenue", "sales", "profit", "margin", "income"):
+        if w in ("revenue", "sales", "profit", "margin", "income", "metric"):
             expanded.extend(["financial", "growth", "total", "table"])
         elif w in ("method", "algorithm", "architecture", "system"):
             expanded.extend(["model", "design", "technique", "pipeline"])
         elif w in ("result", "finding", "conclusion"):
             expanded.extend(["summary", "metric", "evaluation", "outcome"])
-    rewrites.append(" ".join(dict.fromkeys(expanded)))
+    rewrites = [" ".join(dict.fromkeys(expanded))]
     return [r for r in rewrites if r.strip() != query.strip()][:2]
 
 
-def execute_llm_generation(
+def generate_llm_response(
     query: str,
     evidence_blocks: List[str],
     api_key: str,
@@ -502,22 +702,22 @@ def execute_llm_generation(
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
 
-    if "Compare" in retrieval_mode:
+    if "Compare" in retrieval_mode or retrieval_mode == "compare_documents":
         system_prompt = (
-            "You are NeuralRAG, an enterprise document intelligence assistant in COMPARE DOCUMENTS mode.\n"
+            "You are NeuralRAG Studio in COMPARE DOCUMENTS mode.\n"
             "Format your answer with Markdown:\n"
             "1. **### Executive Comparison Summary**: High-level cross-file synthesis.\n"
             "2. **### Comparison Matrix (Markdown Table)**: Side-by-side comparison of metrics, claims, or methodologies.\n"
             "3. **### Agreements & Discrepancies**: Where documents align or conflict.\n"
-            "Every claim MUST cite its passage with [Source N | File]."
+            "Every claim MUST cite its passage with [Source N]."
         )
     else:
         system_prompt = (
-            "You are NeuralRAG, an enterprise AI document intelligence assistant.\n"
+            "You are NeuralRAG Studio, an enterprise AI document intelligence assistant.\n"
             "RULES:\n"
             "1. Answer strictly using the provided context passages inside <retrieved_evidence>.\n"
-            "2. Every claim, number, or quote MUST include an inline citation [Source N] (e.g., [Source 1], [Source 2]).\n"
-            "3. If the answer is not supported by the passages, state: 'The uploaded documents do not contain sufficient evidence to answer this question.' Never speculate."
+            "2. Every factual statement, number, or claim MUST include an inline citation [Source N] (e.g. [Source 1], [Source 2]).\n"
+            "3. If the answer is not in the text, state: 'The uploaded documents do not contain sufficient evidence to answer this question.' Never invent information."
         )
 
     context_str = "\n\n".join(evidence_blocks)
@@ -530,7 +730,7 @@ def execute_llm_generation(
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1400}
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1500}
     }
 
     try:
@@ -543,8 +743,7 @@ def execute_llm_generation(
                 if text:
                     return text
             return "The model returned an empty response."
-        else:
-            return f"Gemini API Error (HTTP {res.status_code}): {res.text[:200]}"
+        return f"Gemini API Error (HTTP {res.status_code}): {res.text[:220]}"
     except requests.exceptions.Timeout:
         return f"Request to '{model_id}' timed out after 30 seconds."
     except Exception as exc:
@@ -552,283 +751,464 @@ def execute_llm_generation(
 
 
 # -----------------------------------------------------------------------------
-# 6. Sidebar: Logo, New Chat, Multi-File Uploader, Model, Theme
+# 7. LEFT SIDEBAR: Brand, New Chat, Collection, Search, History, Bottom Controls
 # -----------------------------------------------------------------------------
 with st.sidebar:
+    # A. Brand Logo & Title
     st.markdown("""
-    <div class="brand-header">
-        <div style="width: 32px; height: 32px; border-radius: 8px; background: #3b82f6; color: white; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; font-weight: 800;">N</div>
+    <div class="sb-brand">
+        <div class="sb-logo">✨</div>
         <div>
-            <div class="brand-title">NeuralRAG</div>
-            <div class="brand-sub">AI Document Intelligence</div>
+            <div class="sb-title">NeuralRAG</div>
+            <div class="sb-sub">CRISP + Corrective RAG</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # New Chat Button
-    if st.button("➕ New Chat", use_container_width=True, type="primary"):
+    # B. New Chat Button
+    if st.button("➕ New Chat", use_container_width=True):
         st.session_state["messages"] = []
+        new_id = f"conv-{int(time.time())}"
+        st.session_state["conversations"].insert(0, {
+            "id": new_id,
+            "title": "New Chat",
+            "messages": [],
+            "date": "Today"
+        })
+        st.session_state["active_conv_id"] = new_id
         st.rerun()
 
-    st.markdown("<hr style='margin: 10px 0; border: none; border-top: 1px solid rgba(255,255,255,0.08);'>", unsafe_allow_html=True)
+    # C. Workspace Selector
+    doc_count = len(st.session_state["indexed_files_meta"])
+    st.markdown(f"""
+    <div style="margin: 10px 0; padding: 8px 12px; border-radius: 10px; background: {bg_card}; border: 1px solid {border_color}; display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: {text_primary}; font-weight: 600;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+            <span>📁</span>
+            <span>{st.session_state['active_collection_name']}</span>
+        </div>
+        <span style="padding: 2px 7px; border-radius: 9999px; background: rgba(255,255,255,0.08); font-size: 0.7rem; color: {text_secondary};">{doc_count}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Multi-File Knowledge Base
-    st.markdown("<p style='font-size:0.82rem; font-weight:700; margin-bottom:4px;'>📁 Document Library</p>", unsafe_allow_html=True)
-    uploaded_files = st.file_uploader(
-        "Upload files",
-        type=["pdf", "docx", "xlsx", "xls", "csv", "png", "jpg", "jpeg", "webp", "txt", "md"],
-        accept_multiple_files=True,
-        label_visibility="collapsed",
-        help="Upload multiple documents for unified cross-file intelligence."
-    )
+    # D. Search Conversations
+    search_q = st.text_input("Search", placeholder="Search conversations...", label_visibility="collapsed")
 
-    # Retrieval Strategy
-    st.markdown("<p style='font-size:0.82rem; font-weight:700; margin-top:10px; margin-bottom:4px;'>🛡️ Retrieval Mode</p>", unsafe_allow_html=True)
-    retrieval_mode = st.radio(
-        "Retrieval Mode",
-        [
-            "🛡️ Corrective RAG (CRAG)",
-            "🎯 Document Search",
-            "⚖️ Compare Documents"
-        ],
-        index=0,
-        label_visibility="collapsed"
-    )
+    # E. Conversation History Grouped (TODAY)
+    st.markdown(f"<p style='font-size:0.72rem; font-weight:700; color:{text_muted}; text-transform:uppercase; margin-top:14px; margin-bottom:6px;'>TODAY</p>", unsafe_allow_html=True)
+    
+    for conv in st.session_state["conversations"]:
+        if search_q and search_q.lower() not in conv["title"].lower():
+            continue
+        is_active = (conv["id"] == st.session_state["active_conv_id"])
+        btn_type = "primary" if is_active else "secondary"
+        if st.button(f"💬 {conv['title'][:22]}", key=f"sb_conv_{conv['id']}", use_container_width=True, type=btn_type):
+            st.session_state["active_conv_id"] = conv["id"]
+            st.session_state["messages"] = conv["messages"]
+            st.rerun()
 
-    # Gemini Model Selector
-    st.markdown("<p style='font-size:0.82rem; font-weight:700; margin-top:10px; margin-bottom:4px;'>🤖 Gemini Model</p>", unsafe_allow_html=True)
-    gemini_model = st.selectbox(
-        "Gemini Model",
-        [
-            "gemini-3.1-flash-lite",
-            "gemini-3.5-flash-lite",
-            "gemini-3.5-flash",
-            "gemini-3.1-pro-preview",
-            "gemini-flash-lite-latest"
-        ],
-        index=0,
-        label_visibility="collapsed"
-    )
+    st.markdown("<hr style='margin: 18px 0; border: none; border-top: 1px solid rgba(255,255,255,0.06);'>", unsafe_allow_html=True)
 
-    # Top-K Evidence Chunks
-    top_k = st.slider("Evidence Chunks (Top-K)", min_value=2, max_value=8, value=4)
+    # F. Bottom Sidebar Controls
+    if st.button(f"📖 Document Library ({doc_count} files)", use_container_width=True):
+        st.session_state["show_right_panel"] = True
+        st.session_state["right_panel_tab"] = "files"
+        st.rerun()
 
-    st.markdown("<hr style='margin: 10px 0; border: none; border-top: 1px solid rgba(255,255,255,0.08);'>", unsafe_allow_html=True)
+    with st.expander("⚙️ Settings & RAG Config", expanded=False):
+        top_k = st.slider("Top-K Evidence Chunks", 2, 8, 4)
+        st.session_state["top_k"] = top_k
+        st.caption("Configures hybrid retrieval depth and reranking ceiling.")
 
-    # Theme Toggle Buttons (🌙 Dark / ☀️ Light)
-    st.markdown("<p style='font-size:0.82rem; font-weight:700; margin-bottom:6px;'>🎨 Appearance Theme</p>", unsafe_allow_html=True)
-    tc1, tc2 = st.columns(2)
-    with tc1:
+    # G. Theme Switcher & Status
+    c_th1, c_th2 = st.columns(2)
+    with c_th1:
         if st.button("🌙 Dark", use_container_width=True, type="primary" if is_dark else "secondary"):
             st.session_state["theme_mode"] = "dark"
             st.rerun()
-    with tc2:
+    with c_th2:
         if st.button("☀️ Light", use_container_width=True, type="secondary" if is_dark else "primary"):
             st.session_state["theme_mode"] = "light"
             st.rerun()
 
-    # Protected Server API Key Badge
-    active_key, key_source = get_primary_api_key()
-    if active_key:
+    if ACTIVE_API_KEY:
         st.markdown(f"""
-        <div style="margin-top: 14px; padding: 8px 12px; border-radius: 8px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); font-size: 0.74rem; color: #10b981;">
-            🔒 <b>Server API Key: Protected & Active</b><br>
-            <span style="color: {t_text_secondary};">Credentials isolated on server</span>
+        <div style="margin-top: 12px; padding: 6px 10px; border-radius: 8px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25); font-size: 0.72rem; color: #10b981;">
+            🔒 <b>Server API Key Active</b>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.warning("⚠️ GEMINI_API_KEY missing in .streamlit/secrets.toml")
-
-    # API Health Ping
-    with st.expander("⚡ API Diagnostics", expanded=False):
-        if st.button("Ping Gemini API", use_container_width=True):
-            with st.spinner("Testing connectivity..."):
-                health = check_api_health(active_key, gemini_model)
-                if health["status"] == "success":
-                    st.success(f"Connected! Latency: {health['latency_ms']}ms")
-                else:
-                    st.error(f"Error: {health.get('message', 'Unknown error')}")
-
-
-# -----------------------------------------------------------------------------
-# 7. Document Ingestion Pipeline
-# -----------------------------------------------------------------------------
-if uploaded_files:
-    file_sig = "_".join(f"{f.name}_{len(f.getvalue())}" for f in uploaded_files)
-    if st.session_state.get("active_file_sig") != file_sig:
-        with st.spinner(f"Ingesting & indexing {len(uploaded_files)} document(s)..."):
-            t0 = time.time()
-            all_pages: List[Dict[str, Any]] = []
-            for f in uploaded_files:
-                pages = parse_single_file(f.getvalue(), f.name, active_key, gemini_model)
-                all_pages.extend(pages)
-
-            if not all_pages:
-                st.error("Could not extract readable text from the uploaded files.")
-                st.stop()
-
-            chunks = build_chunks(all_pages, chunk_size=650, overlap=100)
-            vec, mat = build_search_index(chunks)
-
-            st.session_state["active_file_sig"] = file_sig
-            st.session_state["chunks"] = chunks
-            st.session_state["search_vec"] = vec
-            st.session_state["search_mat"] = mat
-            st.session_state["doc_count"] = len(uploaded_files)
-            st.session_state["file_names"] = [f.name for f in uploaded_files]
-
-
-# -----------------------------------------------------------------------------
-# 8. Main Chat Workspace
-# -----------------------------------------------------------------------------
-chunks = st.session_state.get("chunks", [])
-vec = st.session_state.get("search_vec")
-mat = st.session_state.get("search_mat")
-doc_count = st.session_state.get("doc_count", 0)
-
-if "messages" not in st.session_state:
-    st.session_state["messages"] = []
-
-# Top Workspace Bar
-if chunks:
-    st.markdown(f"""
-    <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; border-radius: 12px; background: {t_bg_card}; border: 1px solid {t_border}; margin-bottom: 16px;">
-        <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 1.1rem;">📚</span>
-            <span style="font-size: 0.86rem; font-weight: 600; color: {t_text_primary};">{doc_count} File(s) Indexed</span>
-            <span style="font-size: 0.76rem; color: {t_text_secondary};">({len(chunks)} Chunks)</span>
+        st.markdown(f"""
+        <div style="margin-top: 12px; padding: 6px 10px; border-radius: 8px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.25); font-size: 0.72rem; color: #f43f5e;">
+            ⚠️ <b>Missing GEMINI_API_KEY in Secrets</b>
         </div>
-        <div style="display: flex; gap: 6px;">
-            <span class="pill-badge">🤖 {gemini_model}</span>
-            <span class="pill-badge">{retrieval_mode.split()[0]} {retrieval_mode.split()[1] if len(retrieval_mode.split()) > 1 else ''}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-# Centered Landing Welcome Screen when Empty
-if not st.session_state["messages"]:
-    st.markdown(f"""
-    <div class="welcome-container">
-        <div class="welcome-logo">✨</div>
-        <div class="welcome-title">What would you like to know from your documents?</div>
-        <div class="welcome-sub">Ask questions across PDF, Word, Excel, CSV, and Markdown with source citations and Corrective RAG verification.</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if doc_count == 0:
-        st.info("💡 Upload one or more documents in the left sidebar to enable source-grounded answers.")
-
-    # 4 Quick Prompt Cards
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("📌 Summarize core findings and conclusions", use_container_width=True):
-            st.session_state["quick_prompt"] = "Summarize the key findings, main arguments, and conclusions across the uploaded documents."
-        if st.button("⚖️ Compare claims and metrics side-by-side", use_container_width=True):
-            st.session_state["quick_prompt"] = "Compare the key findings, methodologies, and metrics across the uploaded documents."
-    with c2:
-        if st.button("📊 Extract quantitative tables & data", use_container_width=True):
-            st.session_state["quick_prompt"] = "Extract all key quantitative figures, tables, and performance metrics from the documents."
-        if st.button("❓ What are the main limitations or risks?", use_container_width=True):
-            st.session_state["quick_prompt"] = "What limitations, security risks, or challenges are highlighted in these documents?"
+        """, unsafe_allow_html=True)
 
 
-# Render Conversation Messages
-for msg in st.session_state["messages"]:
-    if msg["role"] == "user":
-        with st.chat_message("user"):
-            st.markdown(msg["content"])
-    else:
-        with st.chat_message("assistant", avatar="✨"):
-            st.markdown(msg["content"])
+# -----------------------------------------------------------------------------
+# 8. TOP NAVIGATION BAR: Model Selector, Active Collection, Theme, Sources Toggle
+# -----------------------------------------------------------------------------
+t_col1, t_col2, t_col3, t_col4 = st.columns([3.5, 3.5, 1.2, 1.8])
 
-            # Citations Accordion
-            if msg.get("citations"):
-                with st.expander(f"📚 Verified Sources ({len(msg['citations'])})", expanded=False):
-                    for idx, cit in enumerate(msg["citations"], start=1):
-                        st.markdown(f"""
-                        <div style="padding: 8px 12px; margin-bottom: 6px; border-radius: 8px; background: {t_input_bg}; border: 1px solid {t_border}; font-size: 0.82rem;">
-                            <div style="font-weight: 600; color: {t_accent}; margin-bottom: 2px;">Source {idx}: {cit['label']}</div>
-                            <div style="color: {t_text_secondary}; line-height: 1.4;">{cit['text'][:320]}...</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+with t_col1:
+    model_choice = st.selectbox(
+        "Active Model",
+        [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.1-pro-preview"
+        ],
+        index=0,
+        label_visibility="collapsed"
+    )
+    st.session_state["selected_model"] = model_choice
 
-            # CRAG Diagnostic Trace
-            if msg.get("crag_trace") and msg["crag_trace"].get("rewritten_queries"):
-                with st.expander("🛡️ Corrective RAG (CRAG) Search Expansion Trace", expanded=False):
-                    st.caption("Initial query had weak semantic alignment. Corrective RAG expanded queries:")
-                    for rq in msg["crag_trace"]["rewritten_queries"]:
-                        st.code(f"Expanded: \"{rq}\"", language=None)
+with t_col2:
+    active_conv_title = next((c["title"] for c in st.session_state["conversations"] if c["id"] == st.session_state["active_conv_id"]), "")
+    if active_conv_title and active_conv_title != "New Chat":
+        st.markdown(f"<p style='font-size:0.8rem; color:{text_muted}; margin-top:8px; border-left:1px solid {border_color}; padding-left:12px;'>{active_conv_title[:35]}</p>", unsafe_allow_html=True)
 
-            # Metadata Footer
-            st.caption(f"⚡ Latency: **{msg.get('latency', 0.0):.2f}s** • 🤖 Model: **{msg.get('model', gemini_model)}** • 🛡️ Mode: **{msg.get('mode', 'RAG')}**")
-
-
-# Bottom Chat Composer
-user_input = st.chat_input("Ask anything about your documents...")
-
-if st.session_state.get("quick_prompt"):
-    user_input = st.session_state.pop("quick_prompt")
-
-if user_input and user_input.strip():
-    st.session_state["messages"].append({"role": "user", "content": user_input})
-
-    with st.spinner("Analyzing documents & generating grounded response..."):
-        t_start = time.time()
-        citations = []
-        crag_trace = None
-
-        if chunks and vec is not None and mat is not None:
-            # 1. Initial Retrieval Pass
-            ranked = search_chunks(user_input, chunks, vec, mat, top_k=top_k)
-            top_score = ranked[0][1] if ranked else 0.0
-
-            crag_trace = {
-                "mode": retrieval_mode,
-                "top_score": top_score,
-                "rewritten_queries": []
-            }
-
-            # 2. Corrective RAG Retry Loop when score is low or ambiguous
-            if "Corrective" in retrieval_mode and (top_score < 0.28 or len(ranked) < 2):
-                rewrites = expand_query_for_crag(user_input)
-                crag_trace["rewritten_queries"] = rewrites
-                seen_texts = {c[0]["text"] for c in ranked}
-                for rq in rewrites:
-                    extra = search_chunks(rq, chunks, vec, mat, top_k=top_k)
-                    for ch, sc in extra:
-                        if ch["text"] not in seen_texts:
-                            ranked.append((ch, sc))
-                            seen_texts.add(ch["text"])
-                ranked.sort(key=lambda x: x[1], reverse=True)
-                ranked = ranked[:top_k]
-
-            evidence_blocks = []
-            for i, (c, sc) in enumerate(ranked, start=1):
-                citations.append({"label": c["label"], "text": c["text"], "score": sc})
-                evidence_blocks.append(f"<source id=\"Source {i}\" location=\"{c['label']}\">\n{c['text']}\n</source>")
-
-            if active_key:
-                final_answer = execute_llm_generation(
-                    user_input,
-                    evidence_blocks,
-                    active_key,
-                    gemini_model,
-                    retrieval_mode
-                )
-            else:
-                final_answer = "⚠️ Server GEMINI_API_KEY is not configured. Please add it to .streamlit/secrets.toml."
-        else:
-            final_answer = "⚠️ Please upload one or more documents in the left sidebar to enable grounded document analysis."
-
-        t_elapsed = time.time() - t_start
-
-        st.session_state["messages"].append({
-            "role": "assistant",
-            "content": final_answer,
-            "citations": citations,
-            "crag_trace": crag_trace,
-            "latency": t_elapsed,
-            "model": gemini_model,
-            "mode": retrieval_mode
-        })
+with t_col3:
+    if st.button("☀️" if is_dark else "🌙", help="Toggle Light / Dark Appearance"):
+        st.session_state["theme_mode"] = "light" if is_dark else "dark"
         st.rerun()
+
+with t_col4:
+    sources_btn_text = "📁 Sources" if not st.session_state["show_right_panel"] else "✕ Close"
+    if st.button(sources_btn_text, use_container_width=True, type="primary" if st.session_state["show_right_panel"] else "secondary"):
+        st.session_state["show_right_panel"] = not st.session_state["show_right_panel"]
+        st.rerun()
+
+
+# -----------------------------------------------------------------------------
+# 9. MAIN TWO-COLUMN SPLIT: Central Chat Workspace + Right Document Panel
+# -----------------------------------------------------------------------------
+if st.session_state["show_right_panel"]:
+    chat_col, right_col = st.columns([68, 32], gap="medium")
+else:
+    chat_col = st.container()
+    right_col = None
+
+
+# =============================================================================
+# A. CENTRAL CHAT WORKSPACE (Inside chat_col)
+# =============================================================================
+with chat_col:
+    # 1. Welcome Screen when no messages exist
+    if not st.session_state["messages"]:
+        st.markdown(f"""
+        <div class="welcome-box">
+            <div class="welcome-sparkle">✨</div>
+            <h1 class="welcome-h1">What would you like to know from your documents?</h1>
+            <p class="welcome-p">
+                Ask questions across PDF, Word, Excel, CSV, and Markdown files with 
+                <b>Corrective RAG verification</b> and clickable source citations.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 2. The 5 Next.js Commercial Starter Cards
+        st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#71717a; text-transform:uppercase; margin-bottom:10px;'>Recommended Inquiries</p>", unsafe_allow_html=True)
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            if st.button("📌 Executive Summary [Overview]\nSummarize the key findings, main arguments, and conclusions across my uploaded documents.", key="card_exec", use_container_width=True):
+                st.session_state["pending_prompt"] = "Summarize the key findings, main arguments, and conclusions across my uploaded documents."
+                st.rerun()
+
+            if st.button("📊 Extract Financial & Tabular Metrics [Data & Tables]\nWhat quantitative figures, tables, or performance metrics are reported in these documents?", key="card_tables", use_container_width=True):
+                st.session_state["pending_prompt"] = "What quantitative figures, tables, or performance metrics are reported in these documents?"
+                st.rerun()
+
+            if st.button("🧪 Study Guide & Verification Quiz [CRISP Lab]\nGenerate a concise study guide and a 3-question comprehension quiz with answers grounded strictly in the uploaded files.", key="card_quiz", use_container_width=True):
+                st.session_state["pending_prompt"] = "Generate a concise study guide and a 3-question comprehension quiz with answers grounded strictly in the uploaded files."
+                st.rerun()
+
+        with sc2:
+            if st.button("⚖️ Cross-Document Comparison [Compare Mode]\nCompare the key claims, quantitative metrics, and conclusions across the uploaded files and highlight any discrepancies.", key="card_compare", use_container_width=True):
+                st.session_state["retrieval_mode"] = "compare_documents"
+                st.session_state["pending_prompt"] = "Compare the key claims, quantitative metrics, and conclusions across the uploaded files and highlight any discrepancies."
+                st.rerun()
+
+            if st.button("🔍 Methodology & Architecture Audit [Deep Dive]\nExplain the core methodology, system architecture, or security controls described in the uploaded text.", key="card_audit", use_container_width=True):
+                st.session_state["pending_prompt"] = "Explain the core methodology, system architecture, or security controls described in the uploaded text."
+                st.rerun()
+
+    # 3. Message Stream & History
+    for msg in st.session_state["messages"]:
+        if msg["role"] == "user":
+            with st.chat_message("user"):
+                st.markdown(msg["content"])
+        else:
+            with st.chat_message("assistant", avatar="✨"):
+                st.markdown(msg["content"])
+
+                # Citations Drawer
+                if msg.get("citations"):
+                    with st.expander(f"📚 Verified Sources ({len(msg['citations'])})", expanded=False):
+                        for idx, cit in enumerate(msg["citations"], start=1):
+                            st.markdown(f"""
+                            <div style="padding: 10px 14px; margin-bottom: 8px; border-radius: 10px; background: {bg_app}; border: 1px solid {border_color}; font-size: 0.8rem;">
+                                <div style="font-weight: 600; color: {accent_blue}; margin-bottom: 4px;">Source {idx}: {cit['label']} (Relevance: {cit.get('score', 0):.2f})</div>
+                                <div style="color: {text_secondary}; line-height: 1.45;">{cit['text']}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                # Corrective RAG Trace
+                if msg.get("crag_trace") and msg["crag_trace"].get("rewritten_queries"):
+                    with st.expander("🛡️ Corrective RAG (CRAG) Search Expansion Trace", expanded=False):
+                        st.caption("Initial query had weak semantic alignment. Corrective RAG expanded queries:")
+                        for rq in msg["crag_trace"]["rewritten_queries"]:
+                            st.code(f"Expanded: \"{rq}\"", language=None)
+
+                # Footer
+                st.caption(f"⚡ Latency: **{msg.get('latency', 0.0):.2f}s** • 🤖 Model: **{msg.get('model', st.session_state['selected_model'])}** • 🛡️ Mode: **{msg.get('mode', 'RAG')}**")
+
+    # 4. Retrieval Mode Pills inside Composer Row
+    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+    m_col1, m_col2, m_col3 = st.columns(3)
+    with m_col1:
+        crag_active = (st.session_state["retrieval_mode"] == "corrective_rag")
+        if st.button("🛡️ Corrective RAG", use_container_width=True, type="primary" if crag_active else "secondary"):
+            st.session_state["retrieval_mode"] = "corrective_rag"
+            st.rerun()
+    with m_col2:
+        search_active = (st.session_state["retrieval_mode"] == "document_search")
+        if st.button("🎯 Doc Search", use_container_width=True, type="primary" if search_active else "secondary"):
+            st.session_state["retrieval_mode"] = "document_search"
+            st.rerun()
+    with m_col3:
+        compare_active = (st.session_state["retrieval_mode"] == "compare_documents")
+        if st.button("⚖️ Compare Docs", use_container_width=True, type="primary" if compare_active else "secondary"):
+            st.session_state["retrieval_mode"] = "compare_documents"
+            st.rerun()
+
+    # 5. Bottom Composer Input
+    prompt_placeholder = f"Ask anything about your {doc_count} indexed documents in General Workspace..."
+    user_query = st.chat_input(prompt_placeholder)
+
+    if st.session_state.get("pending_prompt"):
+        user_query = st.session_state.pop("pending_prompt")
+
+    st.markdown(f"<p style='font-size:0.72rem; color:{text_muted}; text-align:center; margin-top:8px;'>Grounded in General Workspace ({doc_count} files) • Click any [Source N] citation to inspect original passage</p>", unsafe_allow_html=True)
+
+    # 6. Response Execution Pipeline
+    if user_query and user_query.strip():
+        # Append User Message
+        st.session_state["messages"].append({"role": "user", "content": user_query})
+
+        # Update Active Conversation Title if it's the first message
+        for conv in st.session_state["conversations"]:
+            if conv["id"] == st.session_state["active_conv_id"]:
+                if conv["title"] == "New Chat":
+                    conv["title"] = user_query[:28] + ("..." if len(user_query) > 28 else "")
+                conv["messages"] = st.session_state["messages"]
+                break
+
+        with st.spinner("Retrieving evidence & generating grounded response..."):
+            t_start = time.time()
+            all_chunks = st.session_state.get("all_chunks", [])
+            citations = []
+            crag_trace = None
+
+            if all_chunks and st.session_state.get("search_vec") is not None:
+                top_k = st.session_state.get("top_k", 4)
+                ranked = search_evidence(user_query, top_k=top_k)
+                top_score = ranked[0][1] if ranked else 0.0
+
+                crag_trace = {
+                    "mode": st.session_state["retrieval_mode"],
+                    "top_score": top_score,
+                    "rewritten_queries": []
+                }
+
+                # CRAG Expansion loop if retrieval quality is ambiguous
+                if st.session_state["retrieval_mode"] == "corrective_rag" and (top_score < 0.28 or len(ranked) < 2):
+                    rewrites = expand_query_crag(user_query)
+                    crag_trace["rewritten_queries"] = rewrites
+                    seen = {c[0]["text"] for c in ranked}
+                    for rq in rewrites:
+                        extra = search_evidence(rq, top_k=top_k)
+                        for ch, sc in extra:
+                            if ch["text"] not in seen:
+                                ranked.append((ch, sc))
+                                seen.add(ch["text"])
+                    ranked.sort(key=lambda x: x[1], reverse=True)
+                    ranked = ranked[:top_k]
+
+                evidence_blocks = []
+                for i, (c, sc) in enumerate(ranked, start=1):
+                    citations.append({"label": c["label"], "text": c["text"], "score": sc, "chunk_id": c["id"]})
+                    evidence_blocks.append(f"<source id=\"Source {i}\" location=\"{c['label']}\">\n{c['text']}\n</source>")
+
+                if ACTIVE_API_KEY:
+                    final_answer = generate_llm_response(
+                        user_query,
+                        evidence_blocks,
+                        ACTIVE_API_KEY,
+                        st.session_state["selected_model"],
+                        st.session_state["retrieval_mode"]
+                    )
+                else:
+                    final_answer = "⚠️ Server GEMINI_API_KEY is not configured in .streamlit/secrets.toml. Please add it to your Streamlit secrets."
+            else:
+                final_answer = "💡 No documents are indexed yet in General Workspace. Please upload PDFs, DOCX, or Excel files in the right Document Workspace panel to enable source-grounded answers."
+
+            t_elapsed = time.time() - t_start
+
+            st.session_state["messages"].append({
+                "role": "assistant",
+                "content": final_answer,
+                "citations": citations,
+                "crag_trace": crag_trace,
+                "latency": t_elapsed,
+                "model": st.session_state["selected_model"],
+                "mode": st.session_state["retrieval_mode"]
+            })
+
+            # Sync active conversation
+            for conv in st.session_state["conversations"]:
+                if conv["id"] == st.session_state["active_conv_id"]:
+                    conv["messages"] = st.session_state["messages"]
+                    break
+
+            st.rerun()
+
+
+# =============================================================================
+# B. RIGHT PANEL: DOCUMENT WORKSPACE & CITATION INSPECTOR (Inside right_col)
+# =============================================================================
+if right_col is not None:
+    with right_col:
+        st.markdown(f"""
+        <div class="doc-panel-container">
+            <div class="doc-panel-header">
+                <div class="doc-panel-title">
+                    <span>📁</span>
+                    <span>Document Workspace</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Tab Selection: Files (N) vs Source Inspector
+        tab_choice = st.radio(
+            "Panel Tab",
+            [f"Files ({doc_count})", "Source Inspector"],
+            index=0 if st.session_state["right_panel_tab"] == "files" else 1,
+            horizontal=True,
+            label_visibility="collapsed"
+        )
+        st.session_state["right_panel_tab"] = "files" if "Files" in tab_choice else "inspector"
+
+        st.markdown("<hr style='margin: 12px 0; border: none; border-top: 1px solid rgba(255,255,255,0.06);'>", unsafe_allow_html=True)
+
+        if st.session_state["right_panel_tab"] == "files":
+            # Active Collection Info
+            st.markdown(f"""
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                <span style="font-size: 0.72rem; font-weight: 700; color: {text_muted}; text-transform: uppercase;">Active Collection</span>
+                <span style="font-size: 0.75rem; color: {accent_blue}; font-weight: 600;">+ New Collection</span>
+            </div>
+            <div style="padding: 8px 12px; border-radius: 10px; background: {bg_card}; border: 1px solid {border_color}; font-size: 0.82rem; font-weight: 600; color: {text_primary}; margin-bottom: 16px;">
+                {st.session_state['active_collection_name']} ({doc_count} files)
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Cloud Drag-and-Drop Uploader Dropzone
+            st.markdown(f"""
+            <div class="dropzone-box">
+                <div class="dropzone-icon">☁️</div>
+                <div class="dropzone-text">Click or drag files to upload into General Workspace</div>
+                <div class="dropzone-pills">
+                    <span class="pill-format">PDF</span>
+                    <span class="pill-format">DOCX</span>
+                    <span class="pill-format">XLSX</span>
+                    <span class="pill-format">CSV</span>
+                    <span class="pill-format">MD</span>
+                    <span class="pill-format">TXT</span>
+                    <span class="pill-format">OCR Images</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            uploaded_files = st.file_uploader(
+                "Upload files into General Workspace",
+                type=["pdf", "docx", "xlsx", "xls", "csv", "png", "jpg", "jpeg", "webp", "txt", "md"],
+                accept_multiple_files=True,
+                label_visibility="collapsed"
+            )
+
+            if uploaded_files:
+                new_files = False
+                existing_names = {m["filename"] for m in st.session_state["indexed_files_meta"]}
+                for f in uploaded_files:
+                    if f.name not in existing_names:
+                        with st.spinner(f"Ingesting {f.name}..."):
+                            chunks, meta = parse_uploaded_file(f.getvalue(), f.name, ACTIVE_API_KEY, st.session_state["selected_model"])
+                            st.session_state["all_chunks"].extend(chunks)
+                            st.session_state["indexed_files_meta"].append(meta)
+                            new_files = True
+
+                if new_files:
+                    reindex_all_documents()
+                    st.rerun()
+
+            # INDEXED FILES List
+            st.markdown(f"""
+            <div style="font-size: 0.72rem; font-weight: 700; color: {text_muted}; text-transform: uppercase; margin-top: 18px; margin-bottom: 10px;">
+                Indexed Files ({doc_count})
+            </div>
+            """, unsafe_allow_html=True)
+
+            if not st.session_state["indexed_files_meta"]:
+                st.caption("No files uploaded yet. Drag files into the box above.")
+            else:
+                for idx, f_meta in enumerate(st.session_state["indexed_files_meta"]):
+                    file_icon = "🖼️" if f_meta["ext"] in ("PNG", "JPG", "JPEG", "WEBP") else "📄"
+                    st.markdown(f"""
+                    <div class="file-item-card">
+                        <div class="file-item-top">
+                            <div class="file-item-name">{file_icon} {f_meta['filename']}</div>
+                            <span class="badge-indexed">● Indexed</span>
+                        </div>
+                        <div class="file-item-meta">
+                            {f_meta['ext']} • {f_meta['size_kb']} KB • {f_meta['chunk_count']} chunks
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    btn_c1, btn_c2 = st.columns(2)
+                    with btn_c1:
+                        if st.button("🔄 Re-index", key=f"reindex_{idx}", use_container_width=True):
+                            reindex_all_documents()
+                            st.toast(f"Re-indexed {f_meta['filename']}")
+                    with btn_c2:
+                        if st.button("🗑️ Remove", key=f"del_{idx}", use_container_width=True):
+                            fname = f_meta["filename"]
+                            st.session_state["indexed_files_meta"] = [m for m in st.session_state["indexed_files_meta"] if m["filename"] != fname]
+                            st.session_state["all_chunks"] = [c for c in st.session_state["all_chunks"] if c["filename"] != fname]
+                            reindex_all_documents()
+                            st.rerun()
+
+        else:
+            # Source Inspector Tab
+            st.markdown(f"""
+            <div style="font-size: 0.72rem; font-weight: 700; color: {text_muted}; text-transform: uppercase; margin-bottom: 10px;">
+                Retrieved Source Inspector
+            </div>
+            """, unsafe_allow_html=True)
+
+            last_msg = next((m for m in reversed(st.session_state["messages"]) if m["role"] == "assistant" and m.get("citations")), None)
+            if last_msg and last_msg.get("citations"):
+                for idx, cit in enumerate(last_msg["citations"], start=1):
+                    st.markdown(f"""
+                    <div style="padding: 12px; margin-bottom: 10px; border-radius: 12px; background: {bg_card}; border: 1px solid {border_color}; font-size: 0.8rem;">
+                        <div style="font-weight: 600; color: {accent_blue}; margin-bottom: 4px;">[Source {idx}] {cit['label']}</div>
+                        <div style="font-size: 0.72rem; color: #10b981; margin-bottom: 6px;">● Cosine Similarity: {cit.get('score', 0):.3f}</div>
+                        <div style="color: {text_secondary}; line-height: 1.45; font-size: 0.76rem;">{cit['text']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("Ask a question in the chat to inspect evidence chunks, provenance, and vector similarity grades here.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
