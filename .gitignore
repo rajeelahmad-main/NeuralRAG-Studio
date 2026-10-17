@@ -1,13 +1,27 @@
-# Streamlit secrets (Keeps API keys private and safe from GitHub!)
+# Secrets & Environment Variables (Never commit API keys!)
 .streamlit/secrets.toml
 secrets.toml
 .env
+.env.local
+.env.*.local
 
-# Python cache & bytecode
+# Local runtime storage & SQLite DB
+storage/
+*.db
+*.db-journal
+
+# Next.js & Node dependencies
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+node_modules/
+
+# Python cache & test artifacts
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.pytest_cache/
 
 # Virtual environments
 .venv/
