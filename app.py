@@ -137,7 +137,8 @@ st.markdown(f"""
     div[data-testid="stDecoration"],
     div[data-testid="stStatusWidget"],
     #MainMenu,
-    header[data-testid="stHeader"] {{
+    header[data-testid="stHeader"],
+    .stAppHeader {{
         display: none !important;
         visibility: hidden !important;
         height: 0px !important;
@@ -146,12 +147,14 @@ st.markdown(f"""
         pointer-events: none !important;
     }}
     .block-container {{
-        padding-top: 1.8rem !important;
+        padding-top: 1.2rem !important;
         padding-bottom: 3.5rem !important;
     }}
 
     /* 2. Global Canvas & Typography */
-    .stApp {{
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMainBlockContainer"] {{
         background-color: {t_bg_app} !important;
         color: {t_text_primary} !important;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -217,7 +220,13 @@ st.markdown(f"""
         color: {t_accent} !important;
     }}
 
-    /* 5. Sticky Bottom Chat Input Box (Eliminate White Input) */
+    /* 5. Sticky Bottom Chat Area (Eliminate White Area) */
+    div[data-testid="stBottom"],
+    div[data-testid="stBottom"] > div,
+    footer {{
+        background-color: {t_bg_app} !important;
+        border-top: none !important;
+    }}
     div[data-testid="stChatInput"] {{
         background-color: {t_input_bg} !important;
         border: 1px solid {t_input_border} !important;
@@ -928,47 +937,60 @@ def perform_retrieval(query: str, chunks: List[Dict[str, Any]], index_payload: T
     return [(chunks[int(i)], float(scores[int(i)])) for i in top_idx]
 
 
-# -----------------------------------------------------------------------------
-# 7. Grounded Generation Pipeline & Detailed API Error Handling
-# -----------------------------------------------------------------------------
-def call_gemini_llm(query: str, context: str, api_key: str, model: str = "gemini-3.1-flash-lite", temperature: float = 0.0) -> str:
+def expand_and_rewrite_query(query: str) -> List[str]:
+    """Generates aspect-based expanded search queries for Corrective RAG retry pass."""
+    stop_words = {
+        "what", "where", "when", "which", "who", "why", "how", "is", "are", "was", "were",
+        "the", "a", "an", "in", "on", "of", "to", "for", "with", "about", "from", "can", "you", "tell", "me"
+    }
+    terms = [w for w in re.findall(r"\w+", query.lower()) if w not in stop_words and len(w) > 2]
+    if not terms:
+        return []
+    rewrites = [" ".join(terms)]
+    expanded = list(terms)
+    for t in terms:
+        if t in ("revenue", "sales", "income", "profit", "margin", "cost"):
+            expanded.extend(["financial", "total", "growth", "quarter", "table"])
+        elif t in ("method", "algorithm", "technique", "system", "architecture"):
+            expanded.extend(["model", "pipeline", "design", "approach"])
+        elif t in ("result", "finding", "conclusion", "summary"):
+            expanded.extend(["overview", "evaluation", "metric", "outcome"])
+    rewrites.append(" ".join(dict.fromkeys(expanded)))
+    return [r for r in rewrites if r.strip() != query.strip()][:2]
+
+
+def call_gemini_llm(
+    query: str,
+    context: str,
+    api_key: str,
+    model: str = "gemini-3.1-flash-lite",
+    temperature: float = 0.0,
+    retrieval_mode: str = "🛡️ Corrective RAG (CRAG)"
+) -> str:
     """
-    Airtight, zero-hallucination RAG generator via Google Gemini with detailed error reporting:
-    - Strictly answers ONLY using facts present in the provided document passages.
-    - If information is not in the text, explicitly states so without speculating.
-    - Captures and reports exact HTTP status codes, error messages, and remediation tips.
+    Airtight, zero-hallucination RAG generator via Google Gemini supporting
+    Document Search, Corrective RAG (CRAG), and Compare Documents modes.
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
 
-    low_q = query.lower()
-    external_triggers = [
-        "extra info", "outside info", "beyond the document", "external info",
-        "outside knowledge", "more than the document", "general knowledge",
-        "explain further outside", "additional info beyond", "external information",
-        "what else do you know", "beyond this document"
-    ]
-    user_requested_extra = any(trigger in low_q for trigger in external_triggers)
-
-    if user_requested_extra:
+    if "Compare" in retrieval_mode:
         system_instruction_text = (
-            "You are an expert AI teaching assistant operating in Retrieval-Augmented Generation mode.\n"
-            "The user has explicitly asked for additional external information beyond the uploaded document.\n"
-            "STRUCTURE YOUR ANSWER CAREFULLY:\n"
-            "1. **### Document Grounded Answer**: First answer strictly based on the provided document passages.\n"
-            "2. **### External Knowledge (Beyond Document)**: Then provide the requested outside information under this separate heading.\n"
-            "Always clearly distinguish between what is directly in the document and what comes from outside."
+            "You are an expert AI document intelligence assistant operating in COMPARE DOCUMENTS mode.\n"
+            "STRUCTURE YOUR ANSWER CLEARLY USING MARKDOWN:\n"
+            "1. **### Executive Comparison Summary**: High-level cross-document synthesis.\n"
+            "2. **### Comparison Matrix (Markdown Table)**: Compare key claims, metrics, or methodologies side-by-side with [Passage # | File] citations.\n"
+            "3. **### Points of Agreement & Discrepancies**: Explicitly highlight where the files align or contradict.\n"
+            "Ground every single fact in the provided passages."
         )
     else:
         system_instruction_text = (
-            "You are a strict, zero-hallucination AI teaching assistant operating in Retrieval-Augmented Generation mode.\n"
-            "CRITICAL OPERATIONAL RULES:\n"
-            "1. SOLE SOURCE OF TRUTH: Answer strictly, exclusively, and faithfully using ONLY facts directly stated in the provided context passages.\n"
-            "2. ZERO UNSOLICITED KNOWLEDGE: Do NOT introduce external facts, general knowledge, outside commentary, or speculative assumptions from your pre-training memory. If a fact is not stated in the passages, IT DOES NOT EXIST.\n"
-            "3. NO EXTRA INFORMATION: Answer ONLY what was explicitly asked. Do NOT provide unsolicited background, related topics, or extra explanations.\n"
-            "4. MISSING INFORMATION RULE: If the answer cannot be found in the provided context passages, respond strictly with:\n"
-            "'The uploaded document does not contain information to answer this question.' Do not attempt to guess or answer partially.\n"
-            "5. CITATIONS: Cite the specific Passage # and Page/Section/Sheet number supporting your response whenever available."
+            "You are a strict, zero-hallucination AI document intelligence assistant operating in Retrieval-Augmented Generation mode.\n"
+            "CRITICAL GROUNDING RULES:\n"
+            "1. Answer strictly and exclusively using facts present in the provided document passages.\n"
+            "2. Never introduce outside facts or assumptions from pre-training memory unless explicitly asked.\n"
+            "3. If the answer cannot be found in the passages, state clearly: 'The uploaded documents do not contain information to answer this question.'\n"
+            "4. Include inline citations like [Passage # | Source] for all key claims, statistics, and conclusions."
         )
 
     user_prompt = (
@@ -1156,11 +1178,25 @@ with st.sidebar:
     st.markdown("<hr style='margin: 12px 0; border: none; border-top: 1px solid rgba(225,29,72,0.2);'>", unsafe_allow_html=True)
 
     # Document Upload in Sidebar
-    st.markdown("**📁 Universal Document Knowledge Base**")
-    uploaded_file = st.file_uploader(
-        "Upload PDF, Word, Excel, CSV, or Image",
+    st.markdown("**📁 Multi-File Document Knowledge Base**")
+    uploaded_files = st.file_uploader(
+        "Upload PDF, Word, Excel, CSV, or Images",
         type=["pdf", "docx", "xlsx", "xls", "csv", "png", "jpg", "jpeg", "webp", "bmp", "txt", "md"],
-        help="Upload course material, scanned PDFs, spreadsheets, or images for AI grounding."
+        accept_multiple_files=True,
+        help="Upload multiple files simultaneously. Chunks are automatically indexed with document provenance."
+    )
+
+    # Retrieval Strategy Selector
+    st.markdown("<p style='font-size:0.84rem; font-weight:700; margin-top:10px; margin-bottom:4px;'>🛡️ Retrieval Strategy</p>", unsafe_allow_html=True)
+    retrieval_mode = st.radio(
+        "Retrieval Mode",
+        [
+            "🛡️ Corrective RAG (CRAG)",
+            "🎯 Document Search",
+            "⚖️ Compare Documents"
+        ],
+        index=0,
+        label_visibility="collapsed"
     )
 
     # Model & Index Settings Accordion
@@ -1189,34 +1225,49 @@ with st.sidebar:
 
 
 # -----------------------------------------------------------------------------
-# 9. Document Ingestion Pipeline
+# 9. Multi-File Document Ingestion Pipeline
 # -----------------------------------------------------------------------------
-if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    file_id = f"{uploaded_file.name}_{len(file_bytes)}_{chunk_size}_{chunk_overlap}_{embed_method}"
+if uploaded_files:
+    file_signature = "_".join(f"{f.name}_{len(f.getvalue())}" for f in uploaded_files) + f"_{chunk_size}_{chunk_overlap}_{embed_method}"
 
-    if st.session_state.get("active_file_id") != file_id:
-        with st.spinner("🩸 Parsing document, running OCR & building vector index..."):
+    if st.session_state.get("active_file_id") != file_signature:
+        with st.spinner(f"🩸 Ingesting & indexing {len(uploaded_files)} documents with Gemini OCR..."):
             t0 = time.time()
-            doc_text, pages, doc_type, aux_data = universal_document_loader(
-                uploaded_file,
-                api_key=active_key,
-                model=gemini_model
-            )
+            all_pages = []
+            file_summaries = []
+            combined_texts = []
+            aux_data = {}
 
-            if not doc_text.strip():
-                st.error("⚠️ No readable content found in this document.")
+            for up_f in uploaded_files:
+                doc_text, pages, d_type, aux = universal_document_loader(
+                    up_f,
+                    api_key=active_key,
+                    model=gemini_model
+                )
+                if doc_text.strip():
+                    for p in pages:
+                        p_label = p.get("label") or f"Page {p.get('page_num', 1)}"
+                        p["label"] = f"{up_f.name} • {p_label}"
+                    all_pages.extend(pages)
+                    file_summaries.append(f"{up_f.name} ({d_type})")
+                    combined_texts.append(f"=== Document: {up_f.name} ===\n{doc_text}")
+                    if aux:
+                        aux_data[up_f.name] = aux
+
+            if not all_pages:
+                st.error("⚠️ No readable content found in the uploaded files.")
                 st.stop()
 
-            chunks = build_chunks(pages, chunk_size=chunk_size, overlap=chunk_overlap)
+            chunks = build_chunks(all_pages, chunk_size=chunk_size, overlap=chunk_overlap)
             index_payload = index_chunks(chunks, method=embed_method)
             t_elapsed = time.time() - t0
 
-            st.session_state["active_file_id"] = file_id
-            st.session_state["filename"] = uploaded_file.name
-            st.session_state["doc_type"] = doc_type
-            st.session_state["doc_text"] = doc_text
-            st.session_state["pages"] = pages
+            st.session_state["active_file_id"] = file_signature
+            st.session_state["filename"] = ", ".join(f.name for f in uploaded_files)
+            st.session_state["uploaded_file_names"] = [f.name for f in uploaded_files]
+            st.session_state["doc_type"] = f"{len(uploaded_files)} Files Unified Index"
+            st.session_state["doc_text"] = "\n\n".join(combined_texts)
+            st.session_state["pages"] = all_pages
             st.session_state["chunks"] = chunks
             st.session_state["index_payload"] = index_payload
             st.session_state["indexing_time"] = t_elapsed
@@ -1249,30 +1300,32 @@ tab_chat, tab_preview, tab_chunks, tab_analytics, tab_guide, tab_downloads = st.
 # TAB 1: ChatGPT-Style Conversational Interface
 # -----------------------------------------------------------------------------
 with tab_chat:
-    # Document Status Bar
+    # Document Status Bar & Active Mode Badges
     if chunks:
         words = len(st.session_state.get("doc_text", "").split())
         idx_name = "Dense MiniLM" if index_payload[0] == "dense" else "Sparse TF-IDF"
+        file_count = len(st.session_state.get("uploaded_file_names", [1]))
         st.markdown(f"""
-        <div style="display: flex; align-items: center; justify-content: space-between; background: {t_bg_card}; border: 1px solid {t_border_card}; border-radius: 10px; padding: 12px 20px; margin-bottom: 20px; box-shadow: {t_card_shadow};">
-            <div style="display: flex; align-items: center; gap: 12px;">
-                <span style="font-size: 1.3rem;">📄</span>
-                <div>
-                    <span style="font-weight: 700; color: {t_text_primary};">{filename}</span>
-                    <span style="font-size: 0.8rem; color: {t_text_secondary}; margin-left: 8px;">({doc_type})</span>
+        <div style="display: flex; align-items: center; justify-content: space-between; background: {t_bg_card}; border: 1px solid {t_border_card}; border-radius: 12px; padding: 12px 18px; margin-bottom: 16px; box-shadow: {t_card_shadow};">
+            <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+                <span style="font-size: 1.3rem;">📚</span>
+                <div style="min-width: 0;">
+                    <span style="font-weight: 700; color: {t_text_primary};">{file_count} Document(s) Active</span>
+                    <span style="font-size: 0.78rem; color: {t_text_secondary}; margin-left: 8px; display: inline-block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">({filename})</span>
                 </div>
             </div>
-            <div style="display: flex; gap: 8px;">
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                <span class="metric-pill">🛡️ {retrieval_mode.split()[1] if len(retrieval_mode.split()) > 1 else 'CRAG'}</span>
                 <span class="metric-pill">🧩 {len(chunks)} Chunks</span>
-                <span class="metric-pill">📖 {words:,} Words</span>
                 <span class="metric-pill">⚡ {idx_name}</span>
+                <span class="metric-pill">🤖 {gemini_model}</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
-        <div style="background: {t_accent_glow}; border: 1px dashed {t_accent}; border-radius: 10px; padding: 14px 20px; margin-bottom: 20px; text-align: center; color: {t_text_primary}; font-size: 0.92rem;">
-            💡 <b>Step 1:</b> Upload a PDF (text/scanned), Word, Excel, CSV, or Image in the sidebar to enable grounded multimodal chat.
+        <div style="background: {t_accent_glow}; border: 1px dashed {t_accent}; border-radius: 12px; padding: 14px 20px; margin-bottom: 20px; text-align: center; color: {t_text_primary}; font-size: 0.92rem;">
+            💡 <b>Step 1:</b> Upload one or more documents (PDF, Word, Excel, CSV, or Images) in the sidebar to begin source-grounded intelligence.
         </div>
         """, unsafe_allow_html=True)
 
@@ -1282,22 +1335,22 @@ with tab_chat:
         <div class="welcome-container">
             <div class="welcome-logo">🩸</div>
             <div class="welcome-title">What can I help you discover?</div>
-            <div class="welcome-sub">Ask any question grounded in your uploaded documents. Powered by Google {gemini_model}.</div>
+            <div class="welcome-sub">Ask any question grounded in your documents. Active Mode: <b>{retrieval_mode}</b> • Model: <b>{gemini_model}</b></div>
         </div>
         """, unsafe_allow_html=True)
 
         # 4 Prompt Suggestions
         p_col1, p_col2 = st.columns(2)
         with p_col1:
-            if st.button("📌 Summarize the core topic & conclusions", use_container_width=True):
-                st.session_state["quick_prompt"] = "Provide a comprehensive summary of the core topic, conclusions, and objectives."
-            if st.button("🔬 What methodology or algorithm is used?", use_container_width=True):
-                st.session_state["quick_prompt"] = "What methodology, algorithms, datasets, or techniques are described?"
+            if st.button("📌 Summarize core findings across all files", use_container_width=True):
+                st.session_state["quick_prompt"] = "Provide a comprehensive summary of the core topics, conclusions, and objectives across the documents."
+            if st.button("⚖️ Compare claims and metrics side-by-side", use_container_width=True):
+                st.session_state["quick_prompt"] = "Compare the key findings, metrics, and conclusions across the documents in a side-by-side comparison table."
         with p_col2:
-            if st.button("📊 Extract key statistics & quantitative data", use_container_width=True):
-                st.session_state["quick_prompt"] = "Extract all key statistics, figures, results, tables, and quantitative data."
-            if st.button("❓ What are the limitations or key findings?", use_container_width=True):
-                st.session_state["quick_prompt"] = "What limitations, challenges, or key findings are highlighted?"
+            if st.button("📊 Extract quantitative tables & statistics", use_container_width=True):
+                st.session_state["quick_prompt"] = "Extract all key statistics, figures, results, tables, and quantitative data from the files."
+            if st.button("❓ What are the discrepancies or limitations?", use_container_width=True):
+                st.session_state["quick_prompt"] = "What limitations, challenges, discrepancies, or conflicting conclusions are highlighted?"
 
     # Render Conversation History with Native Chat Messages for Perfect Markdown Formatting
     for msg in st.session_state["messages"]:
@@ -1310,11 +1363,11 @@ with tab_chat:
 
                 # Grounded Evidence Citations
                 if msg.get("sources"):
-                    with st.expander("📚 Grounded Evidence Passages", expanded=False):
+                    with st.expander("📚 Verified Grounded Passages & Citations", expanded=False):
                         for i, (ch, sc) in enumerate(msg["sources"], start=1):
                             pct = max(0.0, min(100.0, sc * 100))
                             source_label = ch.get("label") or f"Source {ch.get('page_num', 1)}"
-                            snippet = ch["text"][:360]
+                            snippet = ch["text"][:380]
                             st.markdown(f"""
                             <div class="citation-card">
                                 <div style="display: flex; justify-content: space-between; color: {t_accent}; font-size: 0.8rem; font-weight: 700; margin-bottom: 4px;">
@@ -1325,13 +1378,21 @@ with tab_chat:
                             </div>
                             """, unsafe_allow_html=True)
 
+                # Corrective RAG Trace Expander
+                if msg.get("crag_trace") and msg["crag_trace"].get("rewritten_queries"):
+                    with st.expander("🛡️ Corrective RAG (CRAG) Diagnostic Trace", expanded=False):
+                        st.caption("Initial retrieval had weak semantic alignment. Corrective RAG expanded the search query:")
+                        for rq in msg["crag_trace"]["rewritten_queries"]:
+                            st.code(f"Expanded Query: \"{rq}\"", language=None)
+
                 # Latency & Model Metadata
                 latency_val = msg.get('latency', 0.0)
                 model_val = msg.get('model', 'Gemini')
-                st.caption(f"⚡ Latency: **{latency_val:.2f}s** | 🤖 Model: **{model_val}**")
+                mode_val = msg.get('mode', 'RAG')
+                st.caption(f"⚡ Latency: **{latency_val:.2f}s** | 🤖 Model: **{model_val}** | 🛡️ Mode: **{mode_val}**")
 
     # Chat Input Trigger
-    user_query = st.chat_input("Ask anything about your uploaded document...")
+    user_query = st.chat_input("Ask anything about your uploaded documents...")
 
     if st.session_state.get("quick_prompt"):
         user_query = st.session_state.pop("quick_prompt")
@@ -1340,13 +1401,36 @@ with tab_chat:
         # Append User Message
         st.session_state["messages"].append({"role": "user", "content": user_query})
 
-        with st.spinner("🩸 Thinking & retrieving grounded passages..."):
+        with st.spinner("🩸 Retrieving passages with Corrective RAG..."):
             t_start = time.time()
             retrieved = []
             final_resp = ""
+            crag_trace = None
 
             if chunks and index_payload is not None:
+                # 1. Initial Retrieval Pass
                 retrieved = perform_retrieval(user_query, chunks, index_payload, top_k=top_k)
+                top_score = retrieved[0][1] if retrieved else 0.0
+                crag_trace = {
+                    "mode": retrieval_mode,
+                    "top_score": top_score,
+                    "rewritten_queries": []
+                }
+
+                # 2. Corrective RAG (CRAG) Retry Loop if score is low
+                if "Corrective" in retrieval_mode and (top_score < 0.28 or len(retrieved) < 2):
+                    rewrites = expand_and_rewrite_query(user_query)
+                    crag_trace["rewritten_queries"] = rewrites
+                    seen_texts = {c[0]["text"] for c in retrieved}
+                    for rq in rewrites:
+                        extra_hits = perform_retrieval(rq, chunks, index_payload, top_k=top_k)
+                        for eh, sc in extra_hits:
+                            if eh["text"] not in seen_texts:
+                                retrieved.append((eh, sc))
+                                seen_texts.add(eh["text"])
+                    retrieved.sort(key=lambda x: x[1], reverse=True)
+                    retrieved = retrieved[:top_k]
+
                 context_blocks = []
                 for i, (c, s) in enumerate(retrieved, start=1):
                     c_label = c.get("label") or f"Page {c.get('page_num', 1)}"
@@ -1354,11 +1438,18 @@ with tab_chat:
                 context_str = "\n\n".join(context_blocks)
 
                 if active_key:
-                    final_resp = call_gemini_llm(user_query, context_str, active_key, model=gemini_model, temperature=temperature)
+                    final_resp = call_gemini_llm(
+                        user_query,
+                        context_str,
+                        active_key,
+                        model=gemini_model,
+                        temperature=temperature,
+                        retrieval_mode=retrieval_mode
+                    )
                 else:
                     final_resp = local_extractive_answer(user_query, retrieved)
             else:
-                final_resp = "⚠️ Please upload a document in the left sidebar first so I can ground my answers in your material."
+                final_resp = "⚠️ Please upload one or more documents in the left sidebar first so I can ground my answers in your material."
 
             t_elapsed = time.time() - t_start
 
@@ -1367,8 +1458,10 @@ with tab_chat:
                 "role": "assistant",
                 "content": final_resp,
                 "sources": retrieved,
+                "crag_trace": crag_trace,
                 "latency": t_elapsed,
-                "model": gemini_model if active_key else "Offline Synthesizer"
+                "model": gemini_model if active_key else "Offline Synthesizer",
+                "mode": retrieval_mode
             })
             st.rerun()
 
