@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   FolderKanban,
+  Menu,
   Moon,
   PanelLeftOpen,
   PanelRightClose,
@@ -135,8 +136,23 @@ export default function NeuralRagWorkspace() {
       setRetrievalMode(settingsData.retrieval_mode || "corrective_rag");
       setConversations(convsData.conversations);
 
-      const docsData = await fetchDocuments(initialColId);
-      setDocuments(docsData.documents);
+      if (convsData.conversations.length > 0) {
+        const latestId = convsData.conversations[0].id;
+        try {
+          const fullConv = await fetchConversation(latestId);
+          setActiveConversation(fullConv);
+          setMessages(fullConv.messages || []);
+          setSelectedModelId(fullConv.model_id);
+          setRetrievalMode(fullConv.retrieval_mode);
+          const docsData = await fetchDocuments(fullConv.collection_id || initialColId, fullConv.id);
+          setDocuments(docsData.documents);
+        } catch {
+          const docsData = await fetchDocuments(initialColId);
+          setDocuments(docsData.documents);
+        }
+      } else {
+        setDocuments([]);
+      }
     } catch (err: any) {
       setErrorMessage(
         err?.message || "Unable to connect to NeuralRAG FastAPI backend on port 8000."
@@ -170,10 +186,11 @@ export default function NeuralRagWorkspace() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
 
-  const refreshCollectionAndDocs = async (colId: string) => {
+  const refreshCollectionAndDocs = async (colId: string, convId?: string | null) => {
+    const targetConvId = convId !== undefined ? convId : activeConversation?.id;
     const [colsData, docsData] = await Promise.all([
       fetchCollections(),
-      fetchDocuments(colId),
+      fetchDocuments(colId, targetConvId),
     ]);
     setCollections(colsData.collections);
     setDocuments(docsData.documents);
@@ -181,7 +198,7 @@ export default function NeuralRagWorkspace() {
 
   const handleSelectCollection = async (colId: string) => {
     setActiveCollectionId(colId);
-    await refreshCollectionAndDocs(colId);
+    await refreshCollectionAndDocs(colId, activeConversation?.id);
     await updateSettings({ active_collection_id: colId });
     if (activeConversation) {
       const updated = await updateConversation(activeConversation.id, {
@@ -223,6 +240,7 @@ export default function NeuralRagWorkspace() {
     if (isStreaming) handleStopGeneration();
     setActiveConversation(null);
     setMessages([]);
+    setDocuments([]);
     setSelectedCitation(null);
     setErrorMessage(null);
     if (typeof window !== "undefined" && window.innerWidth < 1024) {
@@ -238,10 +256,9 @@ export default function NeuralRagWorkspace() {
       setMessages(fullConv.messages || []);
       setSelectedModelId(fullConv.model_id);
       setRetrievalMode(fullConv.retrieval_mode);
-      if (fullConv.collection_id && fullConv.collection_id !== activeCollectionId) {
-        setActiveCollectionId(fullConv.collection_id);
-        await refreshCollectionAndDocs(fullConv.collection_id);
-      }
+      const colId = fullConv.collection_id || activeCollectionId;
+      setActiveCollectionId(colId);
+      await refreshCollectionAndDocs(colId, fullConv.id);
       if (typeof window !== "undefined" && window.innerWidth < 1024) {
         setSidebarOpen(false);
       }
@@ -272,6 +289,7 @@ export default function NeuralRagWorkspace() {
     if (activeConversation?.id === convId) {
       setActiveConversation(null);
       setMessages([]);
+      setDocuments([]);
     }
   };
 
@@ -280,14 +298,27 @@ export default function NeuralRagWorkspace() {
     setIsUploading(true);
     setErrorMessage(null);
     try {
-      const res = await uploadDocuments(activeCollectionId, files);
+      let currentConv = activeConversation;
+      if (!currentConv) {
+        currentConv = await createConversation({
+          title: files[0]?.name ? `Doc: ${files[0].name.slice(0, 24)}` : "New Chat",
+          collection_id: activeCollectionId,
+          model_id: selectedModelId,
+          retrieval_mode: retrievalMode,
+        });
+        setActiveConversation(currentConv);
+        const convsData = await fetchConversations(searchQuery);
+        setConversations(convsData.conversations);
+      }
+
+      const res = await uploadDocuments(activeCollectionId, files, currentConv.id);
       const failed = res.uploaded.filter((d) => d.status === "error");
       if (failed.length > 0) {
         setErrorMessage(
           `Upload issue for ${failed[0].filename}: ${failed[0].error_message}`
         );
       }
-      await refreshCollectionAndDocs(activeCollectionId);
+      await refreshCollectionAndDocs(activeCollectionId, currentConv.id);
     } catch (err: any) {
       setErrorMessage(err?.message || "Document upload failed.");
     } finally {
@@ -450,29 +481,41 @@ export default function NeuralRagWorkspace() {
       <main className="flex-1 flex flex-col min-w-0 h-full relative">
         {/* Top Navigation Bar */}
         <header className="h-14 px-3 sm:px-4 border-b border-zinc-200/70 dark:border-zinc-800/70 flex items-center justify-between gap-2 shrink-0 bg-white/80 dark:bg-zinc-950/80 backdrop-blur-md z-20">
-          <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+            {/* Mobile Menu Hamburger Button */}
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((prev) => !prev)}
+              title="Toggle sidebar menu"
+              aria-label="Toggle navigation menu"
+              className="lg:hidden p-2 rounded-xl text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+
+            {/* Desktop Left Sidebar Expand */}
             {!sidebarOpen && (
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setSidebarOpen(true)}
-                  title="Expand sidebar"
-                  aria-label="Expand sidebar"
-                  className="p-2 rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-                >
-                  <PanelLeftOpen className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleNewChat}
-                  title="New Chat"
-                  aria-label="New Chat"
-                  className="p-2 rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-                >
-                  <Plus className="w-4 h-4" />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                title="Expand sidebar"
+                aria-label="Expand sidebar"
+                className="hidden lg:inline-flex p-2 rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+              </button>
             )}
+
+            {/* Quick New Chat Button */}
+            <button
+              type="button"
+              onClick={handleNewChat}
+              title="New Chat"
+              aria-label="New Chat"
+              className="p-2 rounded-xl text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
 
             {/* Gemini Model Selector Dropdown */}
             <ModelSelector
@@ -552,6 +595,9 @@ export default function NeuralRagWorkspace() {
                 <PanelRightOpen className="w-4 h-4" />
               )}
               <span className="hidden sm:inline">Sources</span>
+              <span className="px-1.5 py-0.2 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 font-semibold text-[10px]">
+                {documents.length}
+              </span>
             </button>
           </div>
         </header>
@@ -621,11 +667,11 @@ export default function NeuralRagWorkspace() {
         onUploadFiles={handleUploadFiles}
         onReindexDocument={async (docId) => {
           await reindexDocument(docId);
-          await refreshCollectionAndDocs(activeCollectionId);
+          await refreshCollectionAndDocs(activeCollectionId, activeConversation?.id);
         }}
         onDeleteDocument={async (docId) => {
           await deleteDocument(docId);
-          await refreshCollectionAndDocs(activeCollectionId);
+          await refreshCollectionAndDocs(activeCollectionId, activeConversation?.id);
         }}
         selectedCitation={selectedCitation}
       />

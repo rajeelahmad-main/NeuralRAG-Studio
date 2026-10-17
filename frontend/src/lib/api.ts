@@ -81,17 +81,23 @@ export async function deleteCollection(collectionId: string): Promise<{ deleted:
   return handleResponse(res);
 }
 
-export async function fetchDocuments(collectionId?: string): Promise<{ documents: DocumentItem[] }> {
-  const url = collectionId
-    ? `${API_BASE}/api/documents?collection_id=${encodeURIComponent(collectionId)}`
-    : `${API_BASE}/api/documents`;
+export async function fetchDocuments(
+  collectionId?: string,
+  conversationId?: string | null
+): Promise<{ documents: DocumentItem[] }> {
+  const params = new URLSearchParams();
+  if (collectionId) params.set("collection_id", collectionId);
+  if (conversationId) params.set("conversation_id", conversationId);
+  const qs = params.toString();
+  const url = qs ? `${API_BASE}/api/documents?${qs}` : `${API_BASE}/api/documents`;
   const res = await fetch(url, { cache: "no-store" });
   return handleResponse(res);
 }
 
 export async function uploadDocuments(
   collectionId: string,
-  files: File[]
+  files: File[],
+  conversationId?: string | null
 ): Promise<{
   collection_id: string;
   uploaded: DocumentItem[];
@@ -99,6 +105,7 @@ export async function uploadDocuments(
 }> {
   const formData = new FormData();
   formData.append("collection_id", collectionId);
+  if (conversationId) formData.append("conversation_id", conversationId);
   for (const file of files) {
     formData.append("files", file);
   }

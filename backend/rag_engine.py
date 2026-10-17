@@ -36,6 +36,42 @@ def is_broad_document_query(query: str) -> bool:
     return any(t in q_low for t in BROAD_OVERVIEW_TRIGGERS)
 
 
+def detect_target_file(query: str, chunks: List[Dict[str, Any]]) -> Optional[str]:
+    """Identifies if the user is targeting a specific document by name or ordinal reference."""
+    q_low = query.lower()
+    filenames = sorted(list({c["filename"] for c in chunks}), key=len, reverse=True)
+    for fname in filenames:
+        base = fname.rsplit(".", 1)[0].lower()
+        if len(base) > 2 and (base in q_low or fname.lower() in q_low):
+            return fname
+
+    unique_files = list(dict.fromkeys(c["filename"] for c in chunks))
+    ordinals = [
+        (["first file", "file 1", "document 1", "doc 1"], 0),
+        (["second file", "file 2", "document 2", "doc 2"], 1),
+        (["third file", "file 3", "document 3", "doc 3"], 2),
+    ]
+    for patterns, idx in ordinals:
+        if any(p in q_low for p in patterns) and idx < len(unique_files):
+            return unique_files[idx]
+    return None
+
+
+def sample_chunks_for_broad_summary(chunks: List[Dict[str, Any]], max_chunks: int = 8) -> List[Tuple[Dict[str, Any], float]]:
+    """Distributes chunks evenly across document pages so summaries cover the entire file."""
+    if len(chunks) <= max_chunks:
+        return [(c, 0.95) for c in chunks]
+    sorted_chunks = sorted(chunks, key=lambda c: (c.get("filename", ""), c.get("page_number", 1)))
+    step = max(1, len(sorted_chunks) // max_chunks)
+    sampled = []
+    for i in range(0, len(sorted_chunks), step):
+        if len(sampled) < max_chunks:
+            sampled.append((sorted_chunks[i], 0.95))
+    if sorted_chunks[-1] not in [s[0] for s in sampled] and len(sampled) < max_chunks:
+        sampled.append((sorted_chunks[-1], 0.95))
+    return sampled
+
+
 def evaluate_chunk_relevance(
     query: str,
     scored_chunks: List[Tuple[Dict[str, Any], float]],
@@ -275,18 +311,26 @@ def execute_rag_workflow(
             "model_used": model_id
         }
 
+    target_file = detect_target_file(query, collection_chunks)
+    active_chunks = [c for c in collection_chunks if c["filename"] == target_file] if target_file else collection_chunks
+
     diversify = (retrieval_mode == "compare_documents")
     effective_top_k = max(top_k, 6) if diversify else top_k
 
     # Step 2 & 3: Initial Hybrid Search + Reranking
     initial_results = vector_store.search(
         collection_id=collection_id,
-        chunks=collection_chunks,
+        chunks=active_chunks,
         query=query,
         top_k=effective_top_k,
         rerank=True,
         diversify_files=diversify
     )
+
+    broad_q = is_broad_document_query(query)
+    if broad_q and not diversify:
+        summary_samples = sample_chunks_for_broad_summary(active_chunks, max_chunks=effective_top_k)
+        initial_results = deduplicate_and_merge_results(summary_samples, initial_results, top_k=effective_top_k)
 
     # Step 4: Evaluate Retrieval Relevance
     eval_result = evaluate_chunk_relevance(
@@ -302,7 +346,7 @@ def execute_rag_workflow(
     # Step 5 & 6: Corrective RAG (CRAG) Query Rewrite & Retry Loop when evidence is weak/ambiguous
     if retrieval_mode == "corrective_rag" and eval_result["status"] in ("insufficient", "ambiguous"):
         for attempt in range(1, CRAG_MAX_RETRIES + 1):
-            candidate_rewrites = expand_and_rewrite_queries(query, collection_chunks, attempt=attempt)
+            candidate_rewrites = expand_and_rewrite_queries(query, active_chunks, attempt=attempt)
             if not candidate_rewrites:
                 break
             retries_used += 1
@@ -311,7 +355,7 @@ def execute_rag_workflow(
                     rewritten_queries.append(rq)
                 retry_hits = vector_store.search(
                     collection_id=collection_id,
-                    chunks=collection_chunks,
+                    chunks=active_chunks,
                     query=rq,
                     top_k=effective_top_k,
                     rerank=True,
@@ -403,7 +447,17 @@ def execute_rag_workflow(
         "4. Never fabricate citations, page numbers, or quotations. If a specific aspect of the user's question is not in the sources, state clearly what is missing.\n"
     )
 
-    if retrieval_mode == "compare_documents":
+    if broad_q and retrieval_mode != "compare_documents":
+        mode_instruction = (
+            "ACTIVE MODE: EXECUTIVE DOCUMENT SUMMARY & SYNTHESIS\n"
+            "Deliver an executive-level breakdown of the document:\n"
+            "1. **### Document Overview & Purpose**: Core intent, background, and scope.\n"
+            "2. **### Key Technical Procedures & Architecture**: Essential steps, workflows, or technical details.\n"
+            "3. **### Critical Requirements & Prerequisites**: Required inputs, conditions, or configurations.\n"
+            "4. **### Important Guidelines & Next Steps**: Practical takeaways, verification steps, and conclusions.\n"
+            "STRICT MANDATE: DO NOT output font dictionaries, formatting metadata (e.g. Arial, /Font), or raw stream definitions. Ground every point with inline [Source N] citations."
+        )
+    elif retrieval_mode == "compare_documents":
         mode_instruction = (
             "ACTIVE MODE: COMPARE DOCUMENTS\n"
             "Structure your response clearly with Markdown:\n"

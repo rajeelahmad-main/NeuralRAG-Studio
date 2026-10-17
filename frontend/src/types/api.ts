@@ -29,6 +29,7 @@ export interface Collection {
 export interface DocumentItem {
   id: string;
   collection_id: string;
+  conversation_id?: string;
   filename: string;
   safe_path: string;
   file_type: string;

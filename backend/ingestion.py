@@ -122,6 +122,21 @@ def _detect_heading_in_text(text: str) -> str:
     return ""
 
 
+def sanitize_extracted_text(text: str) -> str:
+    """Strips raw PDF font dictionaries, encoding streams, and binary artifacts."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"/(?:Font|CIDInit|ProcSet|Encoding|FontDescriptor|ToUnicode)\b[^\n\r]*", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<<[^>]{1,300}>>", " ", cleaned)
+    cleaned = re.sub(r"\b(?:Arial(?:-Bold|-Italic)?|TimesNewRoman|Helvetica|Calibri)\b(?:\s+\d+\s+\d+\s+R)?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"obj\s*<<.*?>>\s*endobj", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"stream.*?endstream", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def parse_pdf_bytes(file_bytes: bytes, filename: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     reader = pypdf.PdfReader(BytesIO(file_bytes))
     sections: List[Dict[str, Any]] = []
@@ -133,13 +148,13 @@ def parse_pdf_bytes(file_bytes: bytes, filename: str) -> Tuple[List[Dict[str, An
         except Exception:
             raw_text = ""
 
-        cleaned = re.sub(r"[ \t]+", " ", raw_text).strip()
+        cleaned = sanitize_extracted_text(raw_text)
         if len(cleaned) < 40 and hasattr(page, "images") and len(page.images) > 0:
             try:
                 first_img = page.images[0]
                 ocr_txt = perform_vision_ocr(first_img.data, "image/png")
                 if ocr_txt and not ocr_txt.startswith("[OCR"):
-                    cleaned = ocr_txt
+                    cleaned = sanitize_extracted_text(ocr_txt)
                     ocr_pages += 1
             except Exception:
                 pass

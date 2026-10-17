@@ -545,20 +545,71 @@ def run_gemini_ocr(image_bytes: bytes, mime_type: str, api_key: str, model_id: s
         return f"[OCR Error: {str(exc)}]"
 
 
+def sanitize_extracted_text(text: str) -> str:
+    """Strips raw PDF font dictionaries, encoding streams, and binary artifacts."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"/(?:Font|CIDInit|ProcSet|Encoding|FontDescriptor|ToUnicode)\b[^\n\r]*", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<<[^>]{1,300}>>", " ", cleaned)
+    cleaned = re.sub(r"\b(?:Arial(?:-Bold|-Italic)?|TimesNewRoman|Helvetica|Calibri)\b(?:\s+\d+\s+\d+\s+R)?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"obj\s*<<.*?>>\s*endobj", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"stream.*?endstream", " ", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def detect_target_file(query: str, chunks: List[Dict[str, Any]]) -> Optional[str]:
+    q_low = query.lower()
+    filenames = sorted(list({c["filename"] for c in chunks}), key=len, reverse=True)
+    for fname in filenames:
+        base = fname.rsplit(".", 1)[0].lower()
+        if len(base) > 2 and (base in q_low or fname.lower() in q_low):
+            return fname
+
+    unique_files = list(dict.fromkeys(c["filename"] for c in chunks))
+    ordinals = [
+        (["first file", "file 1", "document 1", "doc 1"], 0),
+        (["second file", "file 2", "document 2", "doc 2"], 1),
+        (["third file", "file 3", "document 3", "doc 3"], 2),
+    ]
+    for patterns, idx in ordinals:
+        if any(p in q_low for p in patterns) and idx < len(unique_files):
+            return unique_files[idx]
+    return None
+
+
+def sample_chunks_for_broad_summary(chunks: List[Dict[str, Any]], max_chunks: int = 8) -> List[Tuple[Dict[str, Any], float]]:
+    if len(chunks) <= max_chunks:
+        return [(c, 0.95) for c in chunks]
+    sorted_chunks = sorted(chunks, key=lambda c: (c.get("filename", ""), c.get("page", 1)))
+    step = max(1, len(sorted_chunks) // max_chunks)
+    sampled = []
+    for i in range(0, len(sorted_chunks), step):
+        if len(sampled) < max_chunks:
+            sampled.append((sorted_chunks[i], 0.95))
+    if sorted_chunks[-1] not in [s[0] for s in sampled] and len(sampled) < max_chunks:
+        sampled.append((sorted_chunks[-1], 0.95))
+    return sampled
+
+
 def parse_uploaded_file(file_bytes: bytes, filename: str, api_key: str, model_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
     ext = os.path.splitext(filename.lower())[1]
     file_size_kb = round(len(file_bytes) / 1024, 1)
+    current_conv = st.session_state.get("active_conv_id", "default")
 
     if ext == ".pdf":
         reader = pypdf.PdfReader(BytesIO(file_bytes))
         for i, page in enumerate(reader.pages, start=1):
-            text = (page.extract_text() or "").strip()
+            raw = (page.extract_text() or "").strip()
+            text = sanitize_extracted_text(raw)
             if len(text) < 40 and api_key and len(page.images) > 0:
                 try:
                     ocr = run_gemini_ocr(page.images[0].data, "image/png", api_key, model_id)
                     if ocr and not ocr.startswith("[OCR"):
-                        text = f"{text}\n\n[Scanned Page OCR]:\n{ocr}".strip()
+                        text = sanitize_extracted_text(ocr)
                 except Exception:
                     pass
             if text:
@@ -605,12 +656,12 @@ def parse_uploaded_file(file_bytes: bytes, filename: str, api_key: str, model_id
     elif ext in (".png", ".jpg", ".jpeg", ".webp"):
         mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
         ocr_text = run_gemini_ocr(file_bytes, mime, api_key, model_id)
-        pages.append({"label": f"{filename} • Multimodal OCR", "text": ocr_text, "filename": filename, "page": 1})
+        pages.append({"label": f"{filename} • Multimodal OCR", "text": sanitize_extracted_text(ocr_text), "filename": filename, "page": 1})
 
     else:
         text = file_bytes.decode("utf-8", errors="ignore").strip()
         if text:
-            pages.append({"label": f"{filename} • Full Text", "text": text, "filename": filename, "page": 1})
+            pages.append({"label": f"{filename} • Full Text", "text": sanitize_extracted_text(text), "filename": filename, "page": 1})
 
     # Chunking
     chunks = []
@@ -629,7 +680,8 @@ def parse_uploaded_file(file_bytes: bytes, filename: str, api_key: str, model_id
                     "label": p["label"],
                     "filename": p["filename"],
                     "page": p.get("page", 1),
-                    "text": substr
+                    "text": substr,
+                    "conv_id": current_conv
                 })
                 c_id += 1
             if end >= len(txt):
@@ -641,7 +693,8 @@ def parse_uploaded_file(file_bytes: bytes, filename: str, api_key: str, model_id
         "ext": ext.replace(".", "").upper() or "TXT",
         "size_kb": file_size_kb,
         "chunk_count": len(chunks),
-        "status": "Indexed"
+        "status": "Indexed",
+        "conv_id": current_conv
     }
 
     return chunks, meta
@@ -664,15 +717,38 @@ def reindex_all_documents():
 # 6. Corrective RAG (CRAG) & Gemini Synthesis Engine
 # -----------------------------------------------------------------------------
 def search_evidence(query: str, top_k: int = 5) -> List[Tuple[Dict[str, Any], float]]:
-    chunks = st.session_state.get("all_chunks", [])
-    vec = st.session_state.get("search_vec")
-    mat = st.session_state.get("search_mat")
-    if not chunks or vec is None or mat is None:
+    all_chunks = st.session_state.get("all_chunks", [])
+    active_conv = st.session_state.get("active_conv_id")
+    
+    # Filter to active conversation chunks if scoped
+    conv_chunks = [c for c in all_chunks if c.get("conv_id") == active_conv] if active_conv else all_chunks
+    if not conv_chunks:
+        conv_chunks = all_chunks
+
+    # Check for target file reference (e.g. "read example1" or "file 1")
+    target_file = detect_target_file(query, conv_chunks)
+    active_chunks = [c for c in conv_chunks if c["filename"] == target_file] if target_file else conv_chunks
+
+    if not active_chunks:
         return []
-    q_vec = vec.transform([query])
-    scores = cosine_similarity(q_vec, mat)[0]
-    top_indices = np.argsort(scores)[::-1][:min(top_k, len(chunks))]
-    return [(chunks[int(i)], float(scores[int(i)])) for i in top_indices]
+
+    # Broad summary query handling (distribute chunks across document)
+    q_low = query.lower()
+    is_summary = any(w in q_low for w in ["summarize", "summary", "overview", "what is this", "explain this", "tell me about this"])
+    if is_summary:
+        return sample_chunks_for_broad_summary(active_chunks, max_chunks=top_k)
+
+    # Sub-index for active chunks
+    texts = [c["text"] for c in active_chunks]
+    vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True)
+    try:
+        mat = vec.fit_transform(texts)
+        q_vec = vec.transform([query])
+        scores = cosine_similarity(q_vec, mat)[0]
+        top_indices = np.argsort(scores)[::-1][:min(top_k, len(active_chunks))]
+        return [(active_chunks[int(i)], float(scores[int(i)])) for i in top_indices]
+    except Exception:
+        return [(active_chunks[i], 0.5) for i in range(min(top_k, len(active_chunks)))]
 
 
 def expand_query_crag(query: str) -> List[str]:
@@ -701,6 +777,8 @@ def generate_llm_response(
 ) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+    q_low = query.lower()
+    is_summary = any(w in q_low for w in ["summarize", "summary", "overview", "what is this", "explain this", "about"])
 
     if "Compare" in retrieval_mode or retrieval_mode == "compare_documents":
         system_prompt = (
@@ -711,13 +789,24 @@ def generate_llm_response(
             "3. **### Agreements & Discrepancies**: Where documents align or conflict.\n"
             "Every claim MUST cite its passage with [Source N]."
         )
+    elif is_summary:
+        system_prompt = (
+            "You are NeuralRAG Studio, an enterprise AI document intelligence assistant.\n"
+            "Provide an executive-level breakdown of the document:\n"
+            "1. **### Document Overview & Purpose**: Core intent, background, and scope.\n"
+            "2. **### Key Technical Procedures & Architecture**: Essential steps, workflows, or technical details.\n"
+            "3. **### Critical Requirements & Prerequisites**: Required inputs, conditions, or configurations.\n"
+            "4. **### Important Guidelines & Next Steps**: Practical takeaways, verification steps, and conclusions.\n"
+            "STRICT MANDATE: DO NOT output font dictionaries, formatting metadata (e.g. Arial, /Font), or raw stream definitions. Ground every point with inline [Source N] citations."
+        )
     else:
         system_prompt = (
             "You are NeuralRAG Studio, an enterprise AI document intelligence assistant.\n"
             "RULES:\n"
             "1. Answer strictly using the provided context passages inside <retrieved_evidence>.\n"
             "2. Every factual statement, number, or claim MUST include an inline citation [Source N] (e.g. [Source 1], [Source 2]).\n"
-            "3. If the answer is not in the text, state: 'The uploaded documents do not contain sufficient evidence to answer this question.' Never invent information."
+            "3. If the answer is not in the text, state: 'The uploaded documents do not contain sufficient evidence to answer this question.' Never invent information.\n"
+            "4. Never output unrendered PDF font tables or metadata definitions."
         )
 
     context_str = "\n\n".join(evidence_blocks)
@@ -1160,10 +1249,17 @@ if right_col is not None:
             </div>
             """, unsafe_allow_html=True)
 
-            if not st.session_state["indexed_files_meta"]:
-                st.caption("No files uploaded yet. Drag files into the box above.")
+            active_conv = st.session_state.get("active_conv_id", "")
+            active_docs = [m for m in st.session_state["indexed_files_meta"] if m.get("conv_id") == active_conv]
+            if not active_docs and not st.session_state.get("messages"):
+                active_docs = []
+            elif not active_docs:
+                active_docs = st.session_state["indexed_files_meta"]
+
+            if not active_docs:
+                st.caption("No files uploaded for this chat yet. Drag files into the box above.")
             else:
-                for idx, f_meta in enumerate(st.session_state["indexed_files_meta"]):
+                for idx, f_meta in enumerate(active_docs):
                     file_icon = "🖼️" if f_meta["ext"] in ("PNG", "JPG", "JPEG", "WEBP") else "📄"
                     st.markdown(f"""
                     <div class="file-item-card">
